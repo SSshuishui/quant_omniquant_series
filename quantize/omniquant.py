@@ -52,53 +52,22 @@ def omniquant(
     # move embedding layer and first layer to target device
     model = lm.model
     dev = lm.device
+
     use_cache = model.config.use_cache
     model.config.use_cache = False
-    is_llama = False
-    if "llama" in args.net.lower():
-        is_llama = True
-        layers = model.model.layers
-        model.model.embed_tokens = model.model.embed_tokens.to(dev)
-        model.model.norm = model.model.norm.to(dev)
-        DecoderLayer = QuantLlamaDecoderLayer
-        pairs = {
-            "q_proj":"qkv",
-            "o_proj":"out",
-            "up_proj":"fc1"
-        }
-        layer_name_prefix = "model.layers"
-    elif "opt" in args.net.lower():
-        layers = model.model.decoder.layers
-        model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.to(dev)
-        model.model.decoder.embed_positions = model.model.decoder.embed_positions.to(dev)
-        if hasattr(model.model.decoder, "project_out") and model.model.decoder.project_out:
-            model.model.decoder.project_out = model.model.decoder.project_out.to(dev)
-        if hasattr(model.model.decoder, "project_in") and model.model.decoder.project_in:
-            model.model.decoder.project_in = model.model.decoder.project_in.to(dev)
-        DecoderLayer = QuantOPTDecoderLayer
-        pairs = {
-            "q_proj":"qkv",
-            "out_proj":"out",
-            "fc1":"fc1"
-        }
-        layer_name_prefix = "model.decoder.layers"
-    elif "falcon" in args.net.lower():
-        layers = model.transformer.h
-        model.transformer.word_embeddings.to(dev)
-        model.transformer.ln_f.to(dev)
-        model.lm_head.to(dev)
-        DecoderLayer = QuantFalconDecoderLayer
-        layer_name_prefix = "model.transformer.h"
-    elif 'mixtral' in args.net.lower():
-        is_llama = True   # same to llama except ffn
-        layers = model.model.layers
-        model.model.embed_tokens = model.model.embed_tokens.to(dev)
-        model.model.norm = model.model.norm.to(dev)
-        layer_name_prefix = "model.layers"
-    else:
-        raise ValueError("Only support for opt/llama/Llama-2/falcon/mixtral now")
-    
-    
+    layers = model.model.layers
+
+    model.model.embed_tokens = model.model.embed_tokens.to(dev)
+    model.model.norm = model.model.norm.to(dev)
+
+    DecoderLayer = QuantLlamaDecoderLayer
+    pairs = {
+        "q_proj":"qkv",
+        "o_proj":"out",
+        "up_proj":"fc1"
+    }
+    layer_name_prefix = "model.layers"
+
     layers[0] = layers[0].to(dev)
     if args.deactive_amp and args.epochs>0:
         dtype = torch.float
@@ -117,24 +86,21 @@ def omniquant(
         def __init__(self, module):
             super().__init__()
             self.module = module
-            self.is_llama = False
 
         def forward(self, inp, **kwargs):
             inps[cache["i"]] = inp
             cache["i"] += 1
-            # cache["attention_mask"] = kwargs["attention_mask"]
-            if self.is_llama:
-                cache["position_ids"] = kwargs["position_ids"]
-            
+            cache["attention_mask"] = kwargs["attention_mask"]
+            cache["position_ids"] = kwargs["position_ids"]
+            print("attention_mask: ", cache["attention_mask"].shape)
+            print("position_ids: ", cache["position_ids"].shape)
+
             raise ValueError
 
     layers[0] = Catcher(layers[0])
-    layers[0].is_llama = is_llama
 
     with torch.no_grad():
         for batch in dataloader:
-            if cache["i"] >= args.nsamples:
-                break
             try:
                 model(batch[0].to(dev))
             except ValueError:
@@ -142,31 +108,19 @@ def omniquant(
     
     # move embedding layer and first layer to cpu
     layers[0] = layers[0].module
-    # layers[0] = layers[0].cpu() 
-    if "llama" in args.net.lower() or "mixtral" in args.net.lower():
-        pass
-        # model.model.embed_tokens = model.model.embed_tokens.cpu()
-        # model.model.norm = model.model.norm.cpu()
-    elif "opt" in args.net.lower():
-        model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.cpu()
-        model.model.decoder.embed_positions = model.model.decoder.embed_positions.cpu()
-        if hasattr(model.model.decoder, "project_out") and model.model.decoder.project_out:
-            model.model.decoder.project_out = model.model.decoder.project_out.cpu()
-        if hasattr(model.model.decoder, "project_in") and model.model.decoder.project_in:
-            model.model.decoder.project_in = model.model.decoder.project_in.cpu()
-    elif 'falcon' in args.model:
-        model.transformer.word_embeddings =  model.transformer.word_embeddings.cpu()
-    else:
-        raise ValueError("Only support for opt/llama/Llama-2/falcon/mixtral now")
+
+    layers[0] = layers[0].cpu() 
+    model.model.embed_tokens = model.model.embed_tokens.cpu()
+    model.model.norm = model.model.norm.cpu()
     torch.cuda.empty_cache()
 
-    
     # same input of first layer for fp model and quant model
     quant_inps = inps
     fp_inps = copy.deepcopy(inps)   # take output of fp model as input
     fp_inps_2 = copy.deepcopy(inps) if args.aug_loss else None # take output of quantization model as input
     
     attention_mask = cache["attention_mask"]
+    position_ids = cache["position_ids"]
 
     if attention_mask is not None:
         attention_mask_batch = attention_mask.repeat(args.batch_size,1,1,1) if args.deactive_amp else attention_mask.repeat(args.batch_size,1,1,1).float()
@@ -179,30 +133,24 @@ def omniquant(
         attention_mask_batch = None
 
     loss_func = torch.nn.MSELoss()
-    if is_llama:
-        position_ids = cache["position_ids"]
-    else:
-        position_ids = None
-
 
     if args.resume:
         omni_parameters = torch.load(args.resume)
     else:
         omni_parameters = {}
+    
+    hf_device_map = model.hf_device_map
+    print(hf_device_map)
 
     for i in range(len(layers)):
         logger.info(f"=== Start quantize layer {i} ===")
-        layer = layers[i].to(dev)
-        if "mixtral" in args.net.lower():  
-            # for mixtral, we only leverage lwc, which can be achieve by simply replace Linear with QuantLinear
-            qlayer = copy.deepcopy(layer)
-            for name, module in qlayer.named_modules():
-                if isinstance(module,torch.nn.Linear) and not "gate" in name:       # do not quantize gate
-                    quantlinear = QuantLinear(module, args.weight_quant_params, args.act_quant_params)
-                    add_new_module(name, qlayer, quantlinear)    
-        else:
-            qlayer = DecoderLayer(lm.model.config, layer, args)
-        qlayer = qlayer.to(dev)
+        hf_device = f"cuda:{hf_device_map[f'{layer_name_prefix}.{i}']}"
+        layer = layers[i].to(hf_device)
+        inps = inps.to(hf_device)
+        position_ids = position_ids.to(hf_device)
+
+        qlayer = DecoderLayer(lm.model.config, layer, args)
+        qlayer = qlayer.to(hf_device)
 
         print('qlayer: ', type(qlayer))
 
@@ -214,12 +162,13 @@ def omniquant(
                     for j in range(args.nsamples):
                         fp_inps[j] = qlayer(fp_inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
                         if args.aug_loss:
-                            fp_inps_2[j] = qlayer(quant_inps[j].unsqueeze(0), attention_mask=attention_mask,position_ids=position_ids)[0]
+                            fp_inps_2[j] = qlayer(quant_inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+        
         # init smooth parameters
         set_quant_state(qlayer, weight_quant=False, act_quant=True)  # weight will be manually quantized before forward
         qlayer.let = args.let
         use_shift = True 
-        if is_llama or args.abits == 16:
+        if args.abits == 16:
             use_shift = False                   # deactivate channel-wise shifting for llama model and weight-only quantization
         if args.let:
             # init channel-wise scaling and shift
@@ -241,7 +190,6 @@ def omniquant(
         if args.resume:
             qlayer.load_state_dict(omni_parameters[i], strict=False)
         
-
         if args.epochs > 0:
             with torch.no_grad():
                 qlayer.float()      # required for AMP training

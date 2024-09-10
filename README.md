@@ -20,20 +20,20 @@ pip install -v .
 1. Obtain the channel-wise scales and shifts required for initialization:
 you can generate channel-wise scales and shifts by yourself:
 ```
-python generate_act_scale_shift.py --model /PATH/TO/LLaMA/llama-7b
+python generate_act_scale_shift.py --model /PATH/TO/LLaMA/
 ```
 
 2. Weight-only quantization
 ```
 # W3A16
 python main.py \
---model /PATH/TO/LLaMA/llama-7b  \
+--model /PATH/TO/LLaMA/  \
 --epochs 20 --output_dir ./log/llama-7b-w3a16 \
 --eval_ppl --wbits 3 --abits 16 --lwc
 
 # W3A16g128
 python main.py \
---model /PATH/TO/LLaMA/llama-7b  \
+--model /PATH/TO/LLaMA/  \
 --epochs 20 --output_dir ./log/llama-7b-w3a16g128 \
 --eval_ppl --wbits 3 --abits 16 --group_size 128 --lwc
 ```
@@ -42,7 +42,7 @@ python main.py \
 ```
 # W4A4
 python main.py \
---model /PATH/TO/LLaMA/llama-7b  \
+--model /PATH/TO/LLaMA/  \
 --epochs 20 --output_dir ./log/llama-7b-w4a4 \
 --eval_ppl --wbits 4 --abits 4 --lwc --let \
 --tasks piqa,arc_easy,arc_challenge,boolq,hellaswag,winogrande
@@ -52,7 +52,7 @@ python main.py \
 take LLaMa-7B with W3A16g128 quantization as an example:
 ```
 python main.py \
---model /PATH/TO/LLaMA/llama-7b  \
+--model /PATH/TO/LLaMA/  \
 --epochs 0 --output_dir ./log/test \
 --eval_ppl --wbits 3 --abits 16 --group_size 128 --lwc \
 --resume /PATH/TO/Pretrained/Parameters 
@@ -88,7 +88,10 @@ More detailed and optional arguments:
 
 [RPTQ: Reorder-Based Post-Training Quantization for Large Language Models](https://github.com/hahnyuan/RPTQ4LLM)
 
-[MLC LLM](https://github.com/mlc-ai/mlc-llm)
-
 [AutoGPTQ](https://github.com/PanQiWei/AutoGPTQ)
 
+[OmniQuant:Omnidirectionally Calibrated Quantization for Large Language Models](https://github.com/OpenGVLab/OmniQuant)
+
+[AffineQuant:Affine Transformation Quantization for Large Language Models](https://github.com/bytedance/AffineQuant)
+
+[LRQuant:Learnable and Robust Post-Training Quantization for Large Language Models](https://github.com/zjq0455/RLQ)

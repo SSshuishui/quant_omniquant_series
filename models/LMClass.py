@@ -25,7 +25,6 @@ class LMClass(BaseLM):
         )
 
         self.tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=False,legacy=False)
-        # self.model = AutoModelForCausalLM.from_pretrained(args.model, config=config, device_map='cpu',torch_dtype=torch.float16)
         self.model = AutoModelForCausalLM.from_pretrained(args.model, config=config, device_map='auto',torch_dtype=torch.float16)
         self.seqlen = self.model.config.max_position_embeddings
         self.model.eval()
@@ -56,12 +55,10 @@ class LMClass(BaseLM):
 
     @property
     def batch_size(self):
-        # TODO: fix multi-gpu
         return self.batch_size_per_gpu  # * gpus
 
     @property
     def device(self):
-        # TODO: fix multi-gpu
         return self._device
 
     def tok_encode(self, string: str):

@@ -4,10 +4,6 @@ import torch.nn.functional as F
 from quantize.quantizer import UniformAffineQuantizer
 
 
-
-
-
-
 class QuantLinear(nn.Module):
     """
     Quantized Module that can perform quantized convolution or normal convolution.
