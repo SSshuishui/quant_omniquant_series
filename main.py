@@ -92,8 +92,7 @@ def evaluate(lm, args, logger):
 
 
     if args.eval_ppl:
-        # for dataset in ["wikitext2", "ptb", "c4","ptb-new",'c4-new']:
-        for dataset in ["wikitext2", "c4"]:
+        for dataset in ["wikitext2", "c4", "ptb"]:
             cache_testloader = f'{args.cache_dir}/testloader_{args.model_family}_{dataset}_all.cache'
             if os.path.exists(cache_testloader):
                 testloader = torch.load(cache_testloader)
@@ -191,7 +190,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, help="model name of model path")
     parser.add_argument("--cache_dir", default="./cache", type=str, help="cache dir of dataset, leading to faster debug")
-    parser.add_argument("--output_dir", default="../log/", type=str, help="direction of logging file")
+    parser.add_argument("--output_dir", default="./log/", type=str, help="direction of logging file")
     parser.add_argument("--save_dir", default=None, type=str, help="direction for saving fake quantization model")
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--real_quant", default=False, action="store_true", help="real quantization, which can see memory reduce. Note that due to the limitations of AutoGPTQ kernels, the real quantization of weight-only quantization can only lead memory reduction, but with slower inference speed.")
@@ -221,7 +220,6 @@ def main():
     parser.add_argument("--a_dynamic_method", type=str, default="per_token", choices=["per_token"])
     parser.add_argument("--w_dynamic_method", type=str, default="per_channel", choices=["per_channel"])
     parser.add_argument("--limit", type=int, default=-1)
-    parser.add_argument("--multigpu", action="store_true", help="at eval, map model to multiple gpus")
     parser.add_argument("--deactive_amp", action="store_true", help="deactivate AMP when 8<=bits<16")
     parser.add_argument(
         "--attn_implementation",
@@ -306,11 +304,6 @@ def main():
         "n_bits": 16,
         "metric": "fix0to1",
     }
-
-    if args.multigpu:
-        gpu_id = get_lowest_occupied_gpu(wait_memory=5000)
-        lm._device = f"cuda:{gpu_id}"
-        logger.info(f"set quantization in gpu {gpu_id}")
 
     # act scales and shifts
     if args.act_scales is None:

@@ -15,8 +15,6 @@ import copy
 from models.transformation import *
 
 
-
-
 class QuantLlamaMLP(nn.Module):
     def __init__(
         self,
@@ -188,7 +186,6 @@ class QuantLlamaAttention(nn.Module):
             if isinstance(m, (QuantLinear, QuantMatMul)):
                 m.set_quant_state(weight_quant, act_quant)
                 
-
 
 class QuantLlamaDecoderLayer(nn.Module):
     def __init__(self, 
