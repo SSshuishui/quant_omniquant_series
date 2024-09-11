@@ -266,7 +266,6 @@ def main():
     for param in lm.model.parameters():
         param.requires_grad = False
 
-
     args.weight_quant_params = {
         "n_bits": args.wbits,
         "per_channel_axes": [0],
