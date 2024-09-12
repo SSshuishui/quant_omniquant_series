@@ -193,7 +193,8 @@ def omniquant(
         print(f'================={i}==================')
         hf_device = f"cuda:{hf_device_map[f'{layer_name_prefix}.{i}']}"
         layer = layers[i].to(hf_device)
-        inps = inps.to(hf_device)
+        fp_inps = fp_inps.to(hf_device)
+        quant_inps = quant_inps.to(hf_device)
         position_ids = position_ids.to(hf_device)
 
         if "mixtral" in args.net.lower():  
@@ -205,8 +206,7 @@ def omniquant(
                     add_new_module(name, qlayer, quantlinear)    
         else:
             qlayer = DecoderLayer(lm.model.config, layer, args)
-        qlayer = qlayer.to(dev)
-
+        qlayer = qlayer.to(hf_device)
         
         # obtain output of full-precision model
         set_quant_state(qlayer, weight_quant=False, act_quant=False)
@@ -260,7 +260,7 @@ def omniquant(
                     # obtain output of quantization model
                     with traincast("cuda"):
                         smooth_and_quant_temporary(qlayer, args, is_llama)
-                        quant_out = qlayer(quant_inps[index:index+args.batch_size,], attention_mask=attention_mask_batch,position_ids=position_ids)[0]
+                        quant_out = qlayer(quant_inps[index:index+args.batch_size,], attention_mask=attention_mask_batch, position_ids=position_ids)[0]
                         loss = loss_func(fp_inps[index:index+args.batch_size,], quant_out)
                         if args.aug_loss:
                             loss += loss_func(fp_inps_2[index:index+args.batch_size,], quant_out)

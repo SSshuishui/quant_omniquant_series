@@ -8,7 +8,6 @@ import time
 from datautils import get_loaders
 from lm_eval import evaluator
 from pprint import pprint
-from parallel_utils import map_layers_to_multi_gpus, get_lowest_occupied_gpu
 import torch.nn as nn
 from quantize.omniquant import omniquant
 from tqdm import tqdm
@@ -52,44 +51,15 @@ net_choices = [
 @torch.no_grad()
 def evaluate(lm, args, logger):
     results = {}
-    if args.multigpu:
-        if "opt" in args.net.lower():
-            map_layers_to_multi_gpus(lm.model.model.decoder.layers)
-            input_device = lm.model.model.decoder.layers[0].device
-            output_device = lm.model.model.decoder.layers[-1].device
-            lm._device = input_device
-            assert input_device == output_device
-            lm.model.model.decoder.embed_positions.to(input_device)
-            lm.model.model.decoder.embed_tokens.to(input_device)
-            lm.model.model.decoder.final_layer_norm.to(output_device)
-            lm.model.lm_head.to(output_device)
+    # if "opt" in args.net.lower():
+    #     lm.model.model.decoder = lm.model.model.decoder.to(lm.device)
+    # elif "llama" in args.net.lower() or "mixtral" in args.net.lower():
+    #     lm.model = lm.model.to(lm.device)
+    # elif "falcon" in args.net.lower():
+    #     lm.model.transformer = lm.model.transformer.to(lm.device)
 
-        elif "llama" in args.net.lower() or "mixtral" in args.net.lower():
-            map_layers_to_multi_gpus(lm.model.model.layers)
-            input_device = lm.model.model.layers[0].device
-            output_device = lm.model.model.layers[-1].device
-            assert input_device == output_device
-            lm._device = input_device
-            lm.model.model.embed_tokens.to(input_device)
-            lm.model.model.norm.to(output_device)
-            lm.model.lm_head.to(output_device)
-        elif "falcon" in args.net.lower():
-            map_layers_to_multi_gpus(lm.model.transformer.h)
-            input_device = lm.model.transformer.h[0].device
-            output_device = lm.model.transformer.h[-1].device
-            assert input_device == output_device
-            lm._device = input_device
-            lm.model.transformer.word_embeddings.to(input_device)
-            lm.model.transformer.ln_f.to(output_device)
-            lm.model.lm_head.to(output_device)
-    else:
-        if "opt" in args.net.lower():
-            lm.model.model.decoder = lm.model.model.decoder.to(lm.device)
-        elif "llama" in args.net.lower() or "mixtral" in args.net.lower():
-            lm.model = lm.model.to(lm.device)
-        elif "falcon" in args.net.lower():
-            lm.model.transformer = lm.model.transformer.to(lm.device)
-
+    hf_device_map = lm.model.hf_device_map
+    hf_device = f"cuda:{hf_device_map[f'model.layers.{len(layers)-1}']}"
 
     if args.eval_ppl:
         for dataset in ["wikitext2", "c4", "ptb"]:
@@ -116,7 +86,7 @@ def evaluate(lm, args, logger):
             lm.model.eval()
             nlls = []
             for i in tqdm(range(nsamples)):
-                batch = testenc[:, (i * lm.seqlen) : ((i + 1) * lm.seqlen)].to(lm.device)
+                batch = testenc[:, (i * lm.seqlen) : ((i + 1) * lm.seqlen)].to(hf_device)
                 if "opt" in args.net.lower():
                     outputs = lm.model.model.decoder(batch)
                 elif "llama" in args.net.lower() or "mixtral" in args.net.lower():
@@ -126,9 +96,7 @@ def evaluate(lm, args, logger):
                 hidden_states = outputs[0]
                 logits = lm.model.lm_head(hidden_states)
                 shift_logits = logits[:, :-1, :]
-                shift_labels = testenc[:, (i * lm.seqlen) : ((i + 1) * lm.seqlen)][
-                    :, 1:
-                ].to(lm.model.lm_head.weight.device)
+                shift_labels = testenc[:, (i * lm.seqlen) : ((i + 1) * lm.seqlen)][:, 1:].to(lm.model.lm_head.weight.device)
                 loss_fct = nn.CrossEntropyLoss()
                 loss = loss_fct(
                     shift_logits.view(-1, shift_logits.size(-1)),
@@ -258,7 +226,7 @@ def main():
     # load model
     if args.net is None:
         args.net = args.model.split('/')[-1]
-    # assert args.net in net_choices
+        
     args.model_family = args.net.split('-')[0]
     lm = LMClass(args)
     lm.seqlen = 2048
