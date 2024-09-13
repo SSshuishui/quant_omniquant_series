@@ -23,18 +23,21 @@ you can generate channel-wise scales and shifts by yourself:
 python generate_act_scale_shift.py --model /PATH/TO/LLaMA/
 ```
 
+### For OmniQuant
 2. Weight-only quantization
 ```
 # W3A16
 python main.py \
+--method omniquant \
 --model /PATH/TO/LLaMA/  \
---epochs 20 --output_dir ./log/llama-7b-w3a16 \
+--epochs 20 --log_dir ./log/llama-7b-w3a16 \
 --eval_ppl --wbits 3 --abits 16 --lwc
 
 # W3A16g128
 python main.py \
+--method omniquant \
 --model /PATH/TO/LLaMA/  \
---epochs 20 --output_dir ./log/llama-7b-w3a16g128 \
+--epochs 20 --log_dir ./log/llama-7b-w3a16g128 \
 --eval_ppl --wbits 3 --abits 16 --group_size 128 --lwc
 ```
 
@@ -42,8 +45,9 @@ python main.py \
 ```
 # W4A4
 python main.py \
+--method omniquant \
 --model /PATH/TO/LLaMA/  \
---epochs 20 --output_dir ./log/llama-7b-w4a4 \
+--epochs 20 --log_dir ./log/llama-7b-w4a4 \
 --eval_ppl --wbits 4 --abits 4 --lwc --let \
 --tasks piqa,arc_easy,arc_challenge,boolq,hellaswag,winogrande
 ```
@@ -52,9 +56,50 @@ python main.py \
 take LLaMa-7B with W3A16g128 quantization as an example:
 ```
 python main.py \
+--method omniquant \
 --model /PATH/TO/LLaMA/  \
---epochs 0 --output_dir ./log/test \
+--epochs 0 --log_dir ./log/test \
 --eval_ppl --wbits 3 --abits 16 --group_size 128 --lwc \
+--resume /PATH/TO/Pretrained/Parameters 
+```
+
+### For AffineQuant
+2. Weight-only quantization
+```
+# W3A16
+python main.py \
+--method affinequant \
+--model /PATH/TO/LLaMA \
+--epochs 20 --log_dir ./log/llama-7b-w3a16 \
+--eval_ppl --wbits 3 --abits 16 --lwc --let --use_ln_matrix --sf 1e-2
+
+# W3A16g128
+python main.py \
+--method affinequant \
+--model /PATH/TO/LLaMA/llama-7b  \
+--epochs 20 --log_dir ./log/llama-7b-w3a16g128 \
+--eval_ppl --wbits 3 --abits 16 --group_size 128 --lwc --let --use_ln_matrix --sf 1e-2
+```
+
+3. weight-activation quantization
+```
+# W4A4
+python main.py \
+--method affinequant \
+--model /PATH/TO/LLaMA/llama-7b  \
+--epochs 20 --log_dir ./log/llama-7b-w4a4 \
+--eval_ppl --wbits 4 --abits 4 --lwc --let --aug_loss --use_matrix --sf 0.1 \
+--tasks hendrycksTest,piqa,arc_easy,arc_challenge,boolq,hellaswag,winogrande
+```
+
+4. evaluation
+take LLaMa-7B with W3A16g128 quantization as an example:
+```
+python main.py \
+--method affinequant \
+--model /PATH/TO/LLaMA/  \
+--epochs 0 --log_dir ./log/test \
+--eval_ppl --wbits 3 --abits 16 --group_size 128 --lwc --let --use_ln_matrix --sf 1e-2 \
 --resume /PATH/TO/Pretrained/Parameters 
 ```
 

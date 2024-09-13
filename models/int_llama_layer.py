@@ -278,20 +278,20 @@ class QuantLlamaDecoderLayer(nn.Module):
                 names.append(name)
                 m.set_quant_state(weight_quant, act_quant)
       
-    def smooth_and_quant_temporary(self):
+    def smooth_and_quant_temporary(self, num_heads, maskqkv, maskfc, use_matrix=False, use_ln_matrix=False):
         if self.let:
             with torch.no_grad():
                 for name, module in self.named_parameters():
                     if "smooth_scale" in name:
                         module.data = truncate_number(module)
             smooth_ln_fcs_temporary(self.input_layernorm,[self.self_attn.q_proj, self.self_attn.k_proj, self.self_attn.v_proj],
-                                    self.qkv_smooth_scale,self.qkv_smooth_shift)
+                                    self.qkv_smooth_scale, maskqkv,self.qkv_smooth_shift,use_ln_matrix=use_ln_matrix)
             smooth_ln_fcs_temporary(self.post_attention_layernorm,[self.mlp.up_proj,self.mlp.gate_proj],
-                                    self.fc1_smooth_scale,self.fc1_smooth_shift)
+                                    self.fc1_smooth_scale, maskqkv,self.fc1_smooth_shift,use_ln_matrix=use_ln_matrix)
             smooth_fc_fc_temporary(self.self_attn.v_proj,self.self_attn.o_proj,
-                                self.out_smooth_scale, self.out_smooth_shift)
-            smooth_q_k_temporary(self.self_attn.q_proj, self.self_attn.k_proj,
-                                self.qkt_smooth_scale)
+                                self.out_smooth_scale, num_heads, maskfc,self.out_smooth_shift)
+            smooth_q_k_temporary(self.self_attn.q_proj, self.self_attn.k_proj, maskfc,
+                                self.qkt_smooth_scale, use_matrix= use_matrix)
             self.mlp.down_proj.temp_weight = self.mlp.down_proj.weight
         else:
             for name, module in self.named_modules():
@@ -315,19 +315,19 @@ class QuantLlamaDecoderLayer(nn.Module):
                 del module.temp_bias
 
     @torch.no_grad()
-    def smooth_and_quant_inplace(self):
+    def smooth_and_quant_inplace(self, num_heads, maskqkv=None, maskfc=None, use_matrix=False, use_ln_matrix=False):
         if self.let:
             for name, module in self.named_parameters():
                 if "smooth_scale" in name:
                     module.data = truncate_number(module)
             smooth_ln_fcs_inplace(self.input_layernorm,[self.self_attn.q_proj, self.self_attn.k_proj, self.self_attn.v_proj],
-                                    self.qkv_smooth_scale,self.qkv_smooth_shift)
+                                    self.qkv_smooth_scale, maskqkv, self.qkv_smooth_shift, use_ln_matrix=use_ln_matrix)
             smooth_ln_fcs_inplace(self.post_attention_layernorm,[self.mlp.up_proj,self.mlp.gate_proj],
-                                    self.fc1_smooth_scale,self.fc1_smooth_shift)
+                                    self.fc1_smooth_scale, maskqkv, self.fc1_smooth_shift, use_ln_matrix=use_ln_matrix)
             smooth_fc_fc_inplace(self.self_attn.v_proj,self.self_attn.o_proj,
-                                self.out_smooth_scale, self.out_smooth_shift)
-            smooth_q_k_inplace(self.self_attn.q_proj, self.self_attn.k_proj,
-                                self.qkt_smooth_scale)
+                                self.out_smooth_scale, num_heads, maskfc, self.out_smooth_shift)
+            smooth_q_k_inplace(self.self_attn.q_proj, self.self_attn.k_proj,maskfc,
+                                self.qkt_smooth_scale,use_matrix=use_matrix)
         for name, module in self.named_modules():
             if isinstance(module, QuantLinear):
                 module.weight = module.weight_quantizer(module.weight)

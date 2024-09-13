@@ -279,6 +279,7 @@ def omniquant(
             clear_temp_variable(qlayer)
             del optimizer
         qlayer.half() 
+        
         # real smooth and quantization
         smooth_and_quant_inplace(qlayer, args, is_llama)
         if args.epochs>0:
@@ -290,7 +291,7 @@ def omniquant(
             register_scales_and_zeros(qlayer)
             layers[i] = qlayer.to("cpu")
             omni_parameters[i] = omni_state_dict(qlayer)
-            torch.save(omni_parameters, os.path.join(args.output_dir, f"omni_parameters.pth"))
+            torch.save(omni_parameters, os.path.join(args.save_dir, f"{args.net}-omni_parameters.pth"))
         else:
             register_scales_and_zeros(qlayer)
             layers[i] = qlayer.to("cpu")
