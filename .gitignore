@@ -182,3 +182,4 @@ act_shifts/
 pre_quantized_models/
 temp.sh
 **/__pycache__
+save_pth/
