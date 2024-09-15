@@ -1,9 +1,5 @@
 import torch
 import torch.nn as nn
-from models.int_llama_layer import QuantLlamaDecoderLayer
-from models.int_opt_layer import QuantOPTDecoderLayer
-from models.int_falcon_layer import QuantFalconDecoderLayer
-from quantize.int_linear import QuantLinear
 from contextlib import nullcontext
 import copy
 import math
@@ -11,9 +7,14 @@ import utils
 import os
 import pdb
 import gc
-from quantize.utils import let_parameters, lwc_parameters, get_omni_parameters,\
+from quantize.omni_utils import let_parameters, lwc_parameters, get_omni_parameters,\
                             omni_state_dict, register_scales_and_zeros,smooth_and_quant_temporary,\
                             smooth_and_quant_inplace,clear_temp_variable,set_quant_state
+from models.int_llama_layer import OmniQuantLlamaDecoderLayer
+from models.int_opt_layer import OmniQuantOPTDecoderLayer
+from models.int_falcon_layer import OmniQuantFalconDecoderLayer
+from quantize.int_linear import QuantLinear
+
 try:
     import auto_gptq.nn_modules.qlinear.qlinear_cuda as qlinear_cuda
     import auto_gptq.nn_modules.qlinear.qlinear_triton as qlinear_triton
@@ -60,7 +61,7 @@ def omniquant(
         layers = model.model.layers
         model.model.embed_tokens = model.model.embed_tokens.to(dev)
         model.model.norm = model.model.norm.to(dev)
-        DecoderLayer = QuantLlamaDecoderLayer
+        DecoderLayer = OmniQuantLlamaDecoderLayer
         pairs = {
             "q_proj":"qkv",
             "o_proj":"out",
@@ -75,7 +76,7 @@ def omniquant(
             model.model.decoder.project_out = model.model.decoder.project_out.to(dev)
         if hasattr(model.model.decoder, "project_in") and model.model.decoder.project_in:
             model.model.decoder.project_in = model.model.decoder.project_in.to(dev)
-        DecoderLayer = QuantOPTDecoderLayer
+        DecoderLayer = OmniQuantOPTDecoderLayer
         pairs = {
             "q_proj":"qkv",
             "out_proj":"out",
@@ -87,7 +88,7 @@ def omniquant(
         model.transformer.word_embeddings.to(dev)
         model.transformer.ln_f.to(dev)
         model.lm_head.to(dev)
-        DecoderLayer = QuantFalconDecoderLayer
+        DecoderLayer = OmniQuantFalconDecoderLayer
         layer_name_prefix = "model.transformer.h"
     elif 'mixtral' in args.net.lower():
         is_llama = True   # same to llama except ffn
@@ -96,7 +97,7 @@ def omniquant(
         model.model.norm = model.model.norm.to(dev)
         layer_name_prefix = "model.layers"
     else:
-        raise ValueError("Only support for opt/llama/Llama-2/falcon/mixtral now")
+        raise ValueError("Only support for opt/llama/Llama-2/Llama-3/falcon/mixtral now")
     
     
     layers[0] = layers[0].to(dev)
@@ -109,7 +110,7 @@ def omniquant(
     inps = torch.zeros(
         (args.nsamples, lm.seqlen, model.config.hidden_size), dtype=dtype, device=dev
     )
-    cache = {"i": 0, "attention_mask": None}
+    cache = {"i": 0, "attention_mask": None, "position_ids": None}
 
     # catch the first layer input
     class Catcher(nn.Module):
@@ -154,7 +155,7 @@ def omniquant(
     elif 'falcon' in args.model:
         model.transformer.word_embeddings =  model.transformer.word_embeddings.cpu()
     else:
-        raise ValueError("Only support for opt/llama/Llama-2/falcon/mixtral now")
+        raise ValueError("Only support for opt/llama/Llama-2/Llama-3/falcon/mixtral now")
     torch.cuda.empty_cache()
 
     

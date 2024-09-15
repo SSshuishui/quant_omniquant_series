@@ -1,9 +1,5 @@
 import torch
 import torch.nn as nn
-from models.int_llama_layer import QuantLlamaDecoderLayer
-from models.int_opt_layer import QuantOPTDecoderLayer
-from models.int_falcon_layer import QuantFalconDecoderLayer
-from quantize.int_linear import QuantLinear
 import auto_gptq.nn_modules.qlinear.qlinear_cuda as qlinear_cuda
 from contextlib import nullcontext
 import copy
@@ -13,6 +9,10 @@ import os
 import pdb
 import gc
 
+from models.int_llama_layer import AffineQuantLlamaDecoderLayer
+from models.int_opt_layer import AffineQuantOPTDecoderLayer
+from models.int_falcon_layer import AffineQuantFalconDecoderLayer
+from quantize.int_linear import QuantLinear
 
 
 def get_named_linears(module):
@@ -28,7 +28,8 @@ def affinequant(
     logger=None,
 ):
     logger.info("Starting ...")
-    
+    args.dtype = torch.float32
+
     # move embedding layer and first layer to target device
     model = lm.model
     dev = lm.device
@@ -40,7 +41,7 @@ def affinequant(
         layers = model.model.layers
         model.model.embed_tokens = model.model.embed_tokens.to(dev)
         model.model.norm = model.model.norm.to(dev)
-        DecoderLayer = QuantLlamaDecoderLayer
+        DecoderLayer = AffineQuantLlamaDecoderLayer
         pairs = {
             "q_proj":"qkv",
             "o_proj":"out",
@@ -55,7 +56,7 @@ def affinequant(
             model.model.decoder.project_out = model.model.decoder.project_out.to(dev)
         if hasattr(model.model.decoder, "project_in") and model.model.decoder.project_in:
             model.model.decoder.project_in = model.model.decoder.project_in.to(dev)
-        DecoderLayer = QuantOPTDecoderLayer
+        DecoderLayer = AffineQuantOPTDecoderLayer
         pairs = {
             "q_proj":"qkv",
             "out_proj":"out",
@@ -67,10 +68,10 @@ def affinequant(
         model.transformer.word_embeddings.to(dev)
         model.transformer.ln_f.to(dev)
         model.lm_head.to(dev)
-        DecoderLayer = QuantFalconDecoderLayer
+        DecoderLayer = AffineQuantFalconDecoderLayer
         layer_name_prefix = "model.transformer.h"
     else:
-        raise ValueError("Only support for opt/llama/Llama-2/falcon now")
+        raise ValueError("Only support for opt/llama/Llama-2/Llama-3/falcon now")
     
     
     layers[0] = layers[0].to(dev)
@@ -79,7 +80,7 @@ def affinequant(
         traincast = nullcontext
     else:
         dtype = args.dtype
-        traincast = torch.cuda.amp.autocast
+        traincast = torch.amp.autocast
     inps = torch.zeros(
         (args.nsamples, lm.seqlen, model.config.hidden_size), dtype=dtype, device=dev
     )
@@ -133,7 +134,7 @@ def affinequant(
     elif 'falcon' in args.model:
         model.transformer.word_embeddings =  model.transformer.word_embeddings.cpu()
     else:
-        raise ValueError("Only support for opt/llama/Llama-2/falcon now")
+        raise ValueError("Only support for opt/llama/Llama-2/Llama-3/falcon now")
     torch.cuda.empty_cache()
 
     
@@ -143,7 +144,15 @@ def affinequant(
     fp_inps_2 = copy.deepcopy(inps) if args.aug_loss else None # take output of quantization model as input
     
     attention_mask = cache["attention_mask"]
-    attention_mask_batch = attention_mask.repeat(args.batch_size,1,1,1) if args.deactive_amp else attention_mask.repeat(args.batch_size,1,1,1).float()
+    if attention_mask is not None:
+        attention_mask_batch = attention_mask.repeat(args.batch_size,1,1,1) if args.deactive_amp else attention_mask.repeat(args.batch_size,1,1,1).float()
+    else:
+        logger.info(
+            "No attention mask caught from the first layer."
+            " Seems that model's attention works without a mask."
+        )
+        attention_mask_batch = None
+
     loss_func = torch.nn.MSELoss()
     if is_llama:
         position_ids = cache["position_ids"]
@@ -175,7 +184,7 @@ def affinequant(
         qlayer.set_quant_state(weight_quant=False, act_quant=False)
         if args.epochs > 0:
             with torch.no_grad():
-                with torch.cuda.amp.autocast("cuda"):
+                with torch.amp.autocast("cuda"):
                     for j in range(args.nsamples):
                         fp_inps[j] = qlayer(fp_inps[j].unsqueeze(0), attention_mask=attention_mask,position_ids=position_ids)[0]
                         if args.aug_loss:

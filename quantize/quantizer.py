@@ -10,8 +10,6 @@ import math
 CLIPMIN = 1e-5
 
 
-
-
 def round_ste(x: torch.Tensor):
     """
     Implement Straight-Through Estimator for rounding operation.

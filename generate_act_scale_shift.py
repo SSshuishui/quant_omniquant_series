@@ -124,13 +124,20 @@ def parse_args():
 def main():
     args = parse_args()
     model, tokenizer = build_model_and_tokenizer(args.model)
-    dataloader, _ = get_loaders(
-    args.calib_dataset,
-    nsamples=args.num_samples,
-    seed=args.seed,
-    model=args.model,
-    seqlen=args.seq_len,
-    )
+    cache_dataloader = f'{args.cache_dir}/dataloader_{args.model_family}_{args.calib_dataset}_{args.nsamples}.cache'
+    if os.path.exists(cache_dataloader):
+        print("load calibration from cache")
+        dataloader = torch.load(cache_dataloader)
+        logger.info(f"load calibration from {cache_dataloader}")
+    else:
+        dataloader, _ = get_loaders(
+            args.calib_dataset,
+            nsamples=args.num_samples,
+            seed=args.seed,
+            model=args.model,
+            seqlen=args.seq_len,
+        )
+        torch.save(dataloader, cache_dataloader)
     
     args.net = args.model.split('/')[-1]
     act_scales = get_act_scales(model, dataloader,args.num_samples)

@@ -1,8 +1,6 @@
 import torch
 from torch import nn
 from typing import Optional, Tuple, List
-from quantize.int_linear import QuantLinear
-from quantize.int_matmul import QuantMatMul
 import torch.nn.functional as F
 from collections import OrderedDict
 import math
@@ -10,11 +8,9 @@ from transformers.models.falcon.configuration_falcon import FalconConfig
 from transformers.models.falcon.modeling_falcon import FalconAttention, dropout_add
 import pdb
 import copy
-from models.transformation import *
-from quantize.omni_norm import OmniLayerNorm
 
-
-
+from quantize.int_linear import QuantLinear
+from quantize.int_matmul import QuantMatMul
 
     
 class QuantFalconMLP(nn.Module):
@@ -29,7 +25,6 @@ class QuantFalconMLP(nn.Module):
         x = self.act(self.dense_h_to_4h(x))
         x = self.dense_4h_to_h(x)
         return x
-
 
                 
 class QuantFalconAttention(nn.Module):
@@ -234,13 +229,14 @@ class QuantFalconAttention(nn.Module):
             else:
                 return output_tensor, present
 
-
-    
-class QuantFalconDecoderLayer(nn.Module):
+ 
+class OmniQuantFalconDecoderLayer(nn.Module):
     def __init__(self, config: FalconConfig,
                  ori_layer,
                  args):
         super().__init__()
+        from quantize.omni_norm import OmniLayerNorm
+
         hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.self_attention = QuantFalconAttention(config, ori_layer.self_attention, args)
@@ -257,6 +253,170 @@ class QuantFalconDecoderLayer(nn.Module):
             self.input_layernorm = OmniLayerNorm(ori_layer.input_layernorm)
             if not config.parallel_attn:
                 self.post_attention_layernorm = OmniLayerNorm(ori_layer.post_attention_layernorm)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor,
+        alibi: Optional[torch.Tensor] = None,
+        layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        head_mask: Optional[torch.Tensor] = None,
+        use_cache: bool = False,
+        output_attentions: bool = False,
+        **kwargs
+    ):
+        residual = hidden_states
+        if self.config.new_decoder_architecture:
+            attention_layernorm_out = self.ln_attn(hidden_states)
+            mlp_layernorm_out = self.ln_mlp(hidden_states)
+        else:
+            attention_layernorm_out = self.input_layernorm(hidden_states)
+
+        # Self attention.
+        attn_outputs = self.self_attention(
+            attention_layernorm_out,
+            layer_past=layer_past,
+            attention_mask=attention_mask,
+            alibi=alibi,
+            head_mask=head_mask,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+        )
+
+        attention_output = attn_outputs[0]
+
+        if not self.config.new_decoder_architecture:
+            if self.config.parallel_attn:
+                mlp_layernorm_out = attention_layernorm_out
+            else:
+                residual = dropout_add(
+                    attention_output, residual, self.config.attention_dropout, training=self.training
+                )
+                mlp_layernorm_out = self.post_attention_layernorm(residual)
+
+        outputs = attn_outputs[1:]
+
+        # MLP.
+        mlp_output = self.mlp(mlp_layernorm_out)
+
+        if self.config.new_decoder_architecture or self.config.parallel_attn:
+            mlp_output += attention_output
+
+        output = dropout_add(mlp_output, residual, self.config.hidden_dropout, training=self.training)
+
+        if use_cache:
+            outputs = (output,) + outputs
+        else:
+            outputs = (output,) + outputs[1:]
+
+        return outputs  # hidden_states, present, attentions
+
+    def set_quant_state(self, weight_quant: bool = False, act_quant: bool = False):
+        # setting weight quantization here does not affect actual forward pass
+        self.use_weight_quant = weight_quant
+        self.use_act_quant = act_quant
+        names = []
+        for name, m in self.named_modules():
+            if isinstance(m, (QuantLinear, QuantMatMul)):
+                names.append(name)
+                m.set_quant_state(weight_quant, act_quant)
+
+    @torch.no_grad()
+    def smooth_and_quant_inplace(self):
+        if self.let:
+            raise ValueError("falcon not yet support let")
+        for name, module in self.named_modules():
+            if isinstance(module, QuantLinear):
+                module.weight = module.weight_quantizer(module.weight)
+                module.use_temporary_parameter=False
+                
+
+    def clear_temp_variable(self):
+        for name, module in self.named_modules():
+            if isinstance(module, QuantLinear):
+                del module.temp_weight
+                del module.temp_bias
+
+    def smooth_and_quant_temporary(self):
+
+        if self.let:
+            raise ValueError("falcon not yet support let")
+        else:
+            for name, module in self.named_modules():
+                if isinstance(module, QuantLinear):
+                    module.temp_weight = module.weight
+        # quant
+        for name, module in self.named_modules():
+            if isinstance(module, QuantLinear):
+                if hasattr(module, "temp_weight"):
+                    module.temp_weight = module.weight_quantizer(module.temp_weight)
+                else:
+                    module.temp_weight = module.weight_quantizer(module.weight)
+                if not hasattr(module, "temp_bias"):
+                    module.temp_bias = module.bias
+                module.use_temporary_parameter=True
+
+
+    def let_parameters(self, use_shift=True):
+        params = []
+        template = "smooth" if use_shift else "smooth_scale"
+        for n, m in self.named_parameters():
+            if n.find(template) > -1:
+                params.append(m)
+        return iter(params)  
+
+    def lwc_parameters(self):
+        params = []
+        for n, m in self.named_parameters():
+            if n.find('bound_factor') > -1:
+                params.append(m)
+        return iter(params)  
+
+    def omni_parameters(self, use_shift=True):
+        params = []
+        template = "smooth" if use_shift else "smooth_scale"
+        for n, m in self.named_parameters():
+            if n.find('bound_factor') > -1 or n.find(template) > -1:
+                params.append(m)
+        return iter(params)  
+    
+    def omni_state_dict(self, destination=None, prefix='', keep_vars=False):
+        if destination is None:
+            destination = OrderedDict()
+        for name, param in self.named_parameters():
+            if name.find('smooth') > -1 or name.find('bound_factor') > -1:
+                destination[prefix + name] = param if keep_vars else param.detach()
+        return destination
+    
+    def register_scales_and_zeros(self):
+        for name, module in self.named_modules():
+            if isinstance(module, QuantLinear):
+                module.weight_quantizer.register_scales_and_zeros()
+    
+
+class AffineQuantFalconDecoderLayer(nn.Module):
+    def __init__(self, config: FalconConfig,
+                 ori_layer,
+                 args):
+        super().__init__()
+        from quantize.affine_norm import AffineLayerNorm
+
+        hidden_size = config.hidden_size
+        self.num_heads = config.num_attention_heads
+        self.self_attention = QuantFalconAttention(config, ori_layer.self_attention, args)
+        self.mlp = QuantFalconMLP(ori_layer.mlp, args)
+        self.hidden_dropout = config.hidden_dropout
+        self.config = config
+
+        if config.new_decoder_architecture:
+            # The layer norm before self-attention
+            self.ln_attn = AffineLayerNorm(ori_layer.ln_attn)
+            # The layer norm before the MLP
+            self.ln_mlp =  AffineLayerNorm(ori_layer.ln_mlp)
+        else:
+            self.input_layernorm = AffineLayerNorm(ori_layer.input_layernorm)
+            if not config.parallel_attn:
+                self.post_attention_layernorm = AffineLayerNorm(ori_layer.post_attention_layernorm)
 
     def forward(
         self,
@@ -375,7 +535,7 @@ class QuantFalconDecoderLayer(nn.Module):
                 params.append(m)
         return iter(params)  
 
-    def omni_parameters(self, use_shift=True):
+    def affine_parameters(self, use_shift=True):
         params = []
         template = "smooth" if use_shift else "smooth_scale"
         for n, m in self.named_parameters():
@@ -383,7 +543,7 @@ class QuantFalconDecoderLayer(nn.Module):
                 params.append(m)
         return iter(params)  
     
-    def omni_state_dict(self, destination=None, prefix='', keep_vars=False):
+    def affine_state_dict(self, destination=None, prefix='', keep_vars=False):
         if destination is None:
             destination = OrderedDict()
         for name, param in self.named_parameters():

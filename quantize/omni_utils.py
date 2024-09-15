@@ -2,7 +2,7 @@ from collections import OrderedDict
 from quantize.int_linear import QuantLinear
 import torch
 from quantize.int_matmul import QuantMatMul
-from models.transformation import *
+from models.omniquant_transformation import *
 
 
 def let_parameters(model, use_shift=True):

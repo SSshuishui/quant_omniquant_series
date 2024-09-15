@@ -14,8 +14,6 @@ import utils
 from pathlib import Path
 from categories import subcategories, categories
 
-from models.int_llama_layer import QuantLlamaDecoderLayer
-from models.int_opt_layer import QuantOPTDecoderLayer
 from quantize.int_linear import QuantLinear
 
 import pdb
@@ -59,8 +57,9 @@ def evaluate(lm, args, logger):
     #     lm.model.transformer = lm.model.transformer.to(lm.device)
 
     hf_device_map = lm.model.hf_device_map
-    hf_device = f"cuda:{hf_device_map[f'model.layers.{len(lm.model.model.layers)-1}']}"
-
+    hf_device = f"cuda:{hf_device_map[f'model.layers.{0}']}"
+    print("hf_device_map: ", hf_device_map, "hf_device: ", hf_device)
+    
     if args.eval_ppl:
         for dataset in ["wikitext2", "c4", "ptb"]:
             cache_testloader = f'{args.cache_dir}/testloader_{args.model_family}_{dataset}_all.cache'
@@ -85,6 +84,7 @@ def evaluate(lm, args, logger):
             lm.model.config.use_cache = False
             lm.model.eval()
             nlls = []
+
             for i in tqdm(range(nsamples)):
                 batch = testenc[:, (i * lm.seqlen) : ((i + 1) * lm.seqlen)].to(hf_device)
                 if "opt" in args.net.lower():
@@ -234,7 +234,7 @@ def main():
     if args.save_dir:
         Path(args.save_dir).mkdir(parents=True, exist_ok=True)
     log_dir = Path(args.log_dir)
-    logger = utils.create_logger(args.net, log_dir)
+    logger = utils.create_logger(args.method, log_dir)
     logger.info(args)
     
     # load model
@@ -315,6 +315,8 @@ def main():
     # quantization
     if args.method == "omniquant" and args.wbits < 16 or args.abits <16:
         from quantize.omniquant import omniquant
+        from models.int_llama_layer import OmniQuantLlamaDecoderLayer
+        from models.int_opt_layer import OmniQuantOPTDecoderLayer
 
         tick = time.time()     
         omniquant(
@@ -326,8 +328,29 @@ def main():
             logger,
         )
         logger.info(time.time() - tick)
+
+        if args.save_dir:
+            logger.info("=== save model ===")
+            # delete omni parameters
+            for name, module in lm.model.named_modules():
+                if isinstance(module, QuantLinear):
+                    del module.weight_quantizer.lowbound_factor
+                    del module.weight_quantizer.upbound_factor
+                if isinstance(module,OmniQuantLlamaDecoderLayer) or isinstance(module,OmniQuantOPTDecoderLayer):
+                    if args.let:
+                        del module.qkv_smooth_scale
+                        del module.qkv_smooth_shift
+                        del module.out_smooth_scale
+                        del module.out_smooth_shift
+                        del module.fc1_smooth_scale
+                        del module.fc1_smooth_shift           
+            lm.model.save_pretrained(args.save_dir)  
+            lm.tokenizer.save_pretrained(args.save_dir) 
+
     elif args.method == "affinequant":
         from quantize.affinequant import affinequant
+        from models.int_llama_layer import AffineQuantLlamaDecoderLayer
+        from models.int_opt_layer import AffineQuantOPTDecoderLayer
 
         tick = time.time()
         affinequant(
@@ -340,23 +363,23 @@ def main():
         )   
         logger.info(time.time() - tick)
 
-    if args.save_dir:
-        logger.info("=== save model ===")
-        # delete omni parameters
-        for name, module in lm.model.named_modules():
-            if isinstance(module, QuantLinear):
-                del module.weight_quantizer.lowbound_factor
-                del module.weight_quantizer.upbound_factor
-            if isinstance(module,QuantLlamaDecoderLayer) or isinstance(module,QuantOPTDecoderLayer):
-                if args.let:
-                    del module.qkv_smooth_scale
-                    del module.qkv_smooth_shift
-                    del module.out_smooth_scale
-                    del module.out_smooth_shift
-                    del module.fc1_smooth_scale
-                    del module.fc1_smooth_shift           
-        lm.model.save_pretrained(args.save_dir)  
-        lm.tokenizer.save_pretrained(args.save_dir) 
+        if args.save_dir:
+            logger.info("=== save model ===")
+            # delete omni parameters
+            for name, module in lm.model.named_modules():
+                if isinstance(module, QuantLinear):
+                    del module.weight_quantizer.lowbound_factor
+                    del module.weight_quantizer.upbound_factor
+                if isinstance(module,AffineQuantLlamaDecoderLayer) or isinstance(module,AffineQuantOPTDecoderLayer):
+                    if args.let:
+                        del module.qkv_smooth_scale
+                        del module.qkv_smooth_shift
+                        del module.out_smooth_scale
+                        del module.out_smooth_shift
+                        del module.fc1_smooth_scale
+                        del module.fc1_smooth_shift           
+            lm.model.save_pretrained(args.save_dir)  
+            lm.tokenizer.save_pretrained(args.save_dir) 
 
     logger.info("=== start evaluation ===")
     evaluate(lm, args,logger)

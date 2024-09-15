@@ -53,7 +53,7 @@ class NativeScalerWithGradNormCount:
         self._scaler.load_state_dict(state_dict)
 
 
-def create_logger(model_name, output_dir, dist_rank=0, name=''):
+def create_logger(method_name, output_dir, dist_rank=0, name=''):
     # create logger
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)
@@ -73,7 +73,7 @@ def create_logger(model_name, output_dir, dist_rank=0, name=''):
         logger.addHandler(console_handler)
 
     # create file handlers
-    file_handler = logging.FileHandler(os.path.join(output_dir, f'{model_name}_log_rank{dist_rank}_{int(time.time())}.txt'), mode='a')
+    file_handler = logging.FileHandler(os.path.join(output_dir, f'{method_name}_log_rank{dist_rank}_{int(time.time())}.txt'), mode='a')
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(logging.Formatter(fmt=fmt, datefmt='%Y-%m-%d %H:%M:%S'))
     logger.addHandler(file_handler)

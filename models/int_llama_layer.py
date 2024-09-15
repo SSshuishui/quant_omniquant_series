@@ -1,10 +1,7 @@
 import torch
 from torch import nn
 from typing import Optional, Tuple, List
-from quantize.int_linear import QuantLinear
-from quantize.int_matmul import QuantMatMul
 import torch.nn.functional as F
-from quantize.omni_norm import OmniLlamaRMSNorm
 from collections import OrderedDict
 import math
 from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding,apply_rotary_pos_emb,LlamaRMSNorm,repeat_kv
@@ -12,7 +9,9 @@ from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.activations import ACT2FN
 import pdb
 import copy
-from models.transformation import *
+
+from quantize.int_linear import QuantLinear
+from quantize.int_matmul import QuantMatMul
 
 
 class QuantLlamaMLP(nn.Module):
@@ -126,7 +125,6 @@ class QuantLlamaAttention(nn.Module):
 
 
         # [bsz, nh, t, hd]
-
         if past_key_value is not None:
             # reuse k, v, self_attention
             key_states = torch.cat([past_key_value[0], key_states], dim=2)
@@ -187,12 +185,14 @@ class QuantLlamaAttention(nn.Module):
                 m.set_quant_state(weight_quant, act_quant)
                 
 
-class QuantLlamaDecoderLayer(nn.Module):
+class OmniQuantLlamaDecoderLayer(nn.Module):
     def __init__(self, 
                  config: LlamaConfig,
                  ori_layer,
                  args):
         super().__init__()
+        from quantize.omni_norm import OmniLlamaRMSNorm
+
         self.hidden_size = config.hidden_size
         self.self_attn = QuantLlamaAttention(
             org_module=ori_layer.self_attn,
@@ -235,9 +235,191 @@ class QuantLlamaDecoderLayer(nn.Module):
 
         hidden_states = self.input_layernorm(hidden_states)
 
-        # hidden_states:  torch.Size([1, 2048, 4096])
-        # attention_mask:  torch.Size([1, 1, 2048, 2049])
-        # position_ids:  torch.Size([1, 2048])
+
+        # Self Attention
+        hidden_states, self_attn_weights, present_key_value = self.self_attn(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_value=past_key_value,
+            output_attentions=output_attentions,
+            use_cache=use_cache,
+        )
+        hidden_states = residual + hidden_states
+
+        # Fully Connected
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        
+
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = residual + hidden_states
+
+        outputs = (hidden_states,)
+
+        if output_attentions:
+            outputs += (self_attn_weights,)
+
+        if use_cache:
+            outputs += (present_key_value,)
+
+        return outputs        
+
+    def set_quant_state(self, weight_quant: bool = False, act_quant: bool = False):
+        # setting weight quantization here does not affect actual forward pass
+        self.use_weight_quant = weight_quant
+        self.use_act_quant = act_quant
+        names = []
+        for name, m in self.named_modules():
+            if isinstance(m, (QuantLinear, QuantMatMul)):
+                names.append(name)
+                m.set_quant_state(weight_quant, act_quant)
+      
+    def smooth_and_quant_temporary(self):
+        from models.omniquant_transformation import truncate_number, smooth_ln_fcs_temporary, smooth_fc_fc_temporary, smooth_q_k_temporary
+
+        if self.let:
+            with torch.no_grad():
+                for name, module in self.named_parameters():
+                    if "smooth_scale" in name:
+                        module.data = truncate_number(module)
+            smooth_ln_fcs_temporary(self.input_layernorm,[self.self_attn.q_proj, self.self_attn.k_proj, self.self_attn.v_proj],
+                                    self.qkv_smooth_scale,self.qkv_smooth_shift)
+            smooth_ln_fcs_temporary(self.post_attention_layernorm,[self.mlp.up_proj,self.mlp.gate_proj],
+                                    self.fc1_smooth_scale,self.fc1_smooth_shift)
+            smooth_fc_fc_temporary(self.self_attn.v_proj,self.self_attn.o_proj,
+                                self.out_smooth_scale, self.out_smooth_shift)
+            smooth_q_k_temporary(self.self_attn.q_proj, self.self_attn.k_proj,
+                                self.qkt_smooth_scale)
+            self.mlp.down_proj.temp_weight = self.mlp.down_proj.weight
+        else:
+            for name, module in self.named_modules():
+                if isinstance(module, QuantLinear):
+                    module.temp_weight = module.weight
+        # quant
+        for name, module in self.named_modules():
+            if isinstance(module, QuantLinear):
+                if hasattr(module, "temp_weight"):
+                    module.temp_weight = module.weight_quantizer(module.temp_weight)
+                else:
+                    module.temp_weight = module.weight_quantizer(module.weight)
+                if not hasattr(module, "temp_bias"):
+                    module.temp_bias = module.bias
+                module.use_temporary_parameter=True
+
+    def clear_temp_variable(self):
+       for name, module in self.named_modules():
+            if isinstance(module, QuantLinear):
+                del module.temp_weight
+                del module.temp_bias
+
+    @torch.no_grad()
+    def smooth_and_quant_inplace(self):
+        from models.omniquant_transformation import truncate_number, smooth_ln_fcs_inplace, smooth_fc_fc_inplace, smooth_q_k_inplace
+        
+        if self.let:
+            for name, module in self.named_parameters():
+                if "smooth_scale" in name:
+                    module.data = truncate_number(module)
+            smooth_ln_fcs_inplace(self.input_layernorm,[self.self_attn.q_proj, self.self_attn.k_proj, self.self_attn.v_proj],
+                                    self.qkv_smooth_scale,self.qkv_smooth_shift)
+            smooth_ln_fcs_inplace(self.post_attention_layernorm,[self.mlp.up_proj,self.mlp.gate_proj],
+                                    self.fc1_smooth_scale,self.fc1_smooth_shift)
+            smooth_fc_fc_inplace(self.self_attn.v_proj,self.self_attn.o_proj,
+                                self.out_smooth_scale, self.out_smooth_shift)
+            smooth_q_k_inplace(self.self_attn.q_proj, self.self_attn.k_proj,
+                                self.qkt_smooth_scale)
+        for name, module in self.named_modules():
+            if isinstance(module, QuantLinear):
+                module.weight = module.weight_quantizer(module.weight)
+                module.use_temporary_parameter=False
+
+    def let_parameters(self, use_shift=True):
+        params = []
+        template = "smooth" if use_shift else "smooth_scale"
+        for n, m in self.named_parameters():
+            if n.find(template) > -1:
+                params.append(m)
+        return iter(params)  
+
+    def lwc_parameters(self):
+        params = []
+        for n, m in self.named_parameters():
+            if n.find('bound_factor') > -1:
+                params.append(m)
+        return iter(params)  
+
+    def omni_parameters(self, use_shift=True):
+        params = []
+        template = "smooth" if use_shift else "smooth_scale"
+        for n, m in self.named_parameters():
+            if n.find('bound_factor') > -1 or n.find(template) > -1:
+                params.append(m)
+        return iter(params)  
+    
+    def omni_state_dict(self, destination=None, prefix='', keep_vars=False):
+        if destination is None:
+            destination = OrderedDict()
+        for name, param in self.named_parameters():
+            if name.find('smooth') > -1 or name.find('bound_factor') > -1:
+                destination[prefix + name] = param if keep_vars else param.detach()
+        return destination
+    
+    def register_scales_and_zeros(self):
+        for name, module in self.named_modules():
+            if isinstance(module, QuantLinear):
+                module.weight_quantizer.register_scales_and_zeros()
+
+
+class AffineQuantLlamaDecoderLayer(nn.Module):
+    def __init__(self, 
+                 config: LlamaConfig,
+                 ori_layer,
+                 args):
+        super().__init__()
+        from quantize.affine_norm import AffineLlamaRMSNorm
+
+        self.hidden_size = config.hidden_size
+        self.self_attn = QuantLlamaAttention(
+            org_module=ori_layer.self_attn,
+            config=config,
+            args=args,
+            )
+        self.mlp = QuantLlamaMLP(
+            org_module=ori_layer.mlp,
+            hidden_size=self.hidden_size,
+            intermediate_size=config.intermediate_size,
+            hidden_act=config.hidden_act,
+            args=args,
+        )
+        self.input_layernorm = AffineLlamaRMSNorm(ori_layer.input_layernorm,eps=ori_layer.input_layernorm.variance_epsilon)
+        self.post_attention_layernorm = AffineLlamaRMSNorm(ori_layer.post_attention_layernorm,eps=ori_layer.post_attention_layernorm.variance_epsilon)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        output_attentions: Optional[bool] = False,
+        use_cache: Optional[bool] = False,
+    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+        """
+        Args:
+            hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
+            attention_mask (`torch.FloatTensor`, *optional*): attention mask of size
+                `(batch, 1, tgt_len, src_len)` where padding elements are indicated by very large negative values.
+            output_attentions (`bool`, *optional*):
+                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
+                returned tensors for more detail.
+            use_cache (`bool`, *optional*):
+                If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding
+                (see `past_key_values`).
+            past_key_value (`Tuple(torch.FloatTensor)`, *optional*): cached past key and value projection states
+        """
+        residual = hidden_states
+
+        hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
@@ -279,6 +461,7 @@ class QuantLlamaDecoderLayer(nn.Module):
                 m.set_quant_state(weight_quant, act_quant)
       
     def smooth_and_quant_temporary(self, num_heads, maskqkv, maskfc, use_matrix=False, use_ln_matrix=False):
+        from models.affinequant_transformation import truncate_number, smooth_ln_fcs_temporary, smooth_fc_fc_temporary, smooth_q_k_temporary
         if self.let:
             with torch.no_grad():
                 for name, module in self.named_parameters():
@@ -316,6 +499,7 @@ class QuantLlamaDecoderLayer(nn.Module):
 
     @torch.no_grad()
     def smooth_and_quant_inplace(self, num_heads, maskqkv=None, maskfc=None, use_matrix=False, use_ln_matrix=False):
+        from models.affinequant_transformation import truncate_number, smooth_ln_fcs_inplace, smooth_fc_fc_inplace, smooth_q_k_inplace
         if self.let:
             for name, module in self.named_parameters():
                 if "smooth_scale" in name:
@@ -348,7 +532,7 @@ class QuantLlamaDecoderLayer(nn.Module):
                 params.append(m)
         return iter(params)  
 
-    def omni_parameters(self, use_shift=True):
+    def affine_parameters(self, use_shift=True):
         params = []
         template = "smooth" if use_shift else "smooth_scale"
         for n, m in self.named_parameters():
@@ -356,7 +540,7 @@ class QuantLlamaDecoderLayer(nn.Module):
                 params.append(m)
         return iter(params)  
     
-    def omni_state_dict(self, destination=None, prefix='', keep_vars=False):
+    def affine_state_dict(self, destination=None, prefix='', keep_vars=False):
         if destination is None:
             destination = OrderedDict()
         for name, param in self.named_parameters():
