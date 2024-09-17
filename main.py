@@ -46,113 +46,6 @@ net_choices = [
     "mixtral-8x7b"]
 
 
-@torch.no_grad()
-def evaluate(lm, args, logger):
-    results = {}
-    # if "opt" in args.net.lower():
-    #     lm.model.model.decoder = lm.model.model.decoder.to(lm.device)
-    # elif "llama" in args.net.lower() or "mixtral" in args.net.lower():
-    #     lm.model = lm.model.to(lm.device)
-    # elif "falcon" in args.net.lower():
-    #     lm.model.transformer = lm.model.transformer.to(lm.device)
-
-    hf_device_map = lm.model.hf_device_map
-    hf_device = f"cuda:{hf_device_map[f'model.layers.{0}']}"
-    print("hf_device_map: ", hf_device_map, "hf_device: ", hf_device)
-    
-    if args.eval_ppl:
-        for dataset in ["wikitext2", "c4", "ptb"]:
-            cache_testloader = f'{args.cache_dir}/testloader_{args.model_family}_{dataset}_all.cache'
-            if os.path.exists(cache_testloader):
-                testloader = torch.load(cache_testloader)
-                logger.info(f"load calibration from {cache_testloader}")
-            else:
-                dataloader, testloader = get_loaders(
-                    dataset,
-                    seed=args.seed,
-                    model=args.model,
-                    seqlen=lm.seqlen,
-                )
-                torch.save(testloader, cache_testloader)
-            if "c4" in dataset:
-                testenc = testloader
-            else:
-                testenc = testloader.input_ids
-
-            nsamples = testenc.numel() // lm.seqlen
-            use_cache = lm.model.config.use_cache
-            lm.model.config.use_cache = False
-            lm.model.eval()
-            nlls = []
-
-            for i in tqdm(range(nsamples)):
-                batch = testenc[:, (i * lm.seqlen) : ((i + 1) * lm.seqlen)].to(hf_device)
-                if "opt" in args.net.lower():
-                    logs = lm.model.model.decoder(batch)
-                elif "llama" in args.net.lower() or "mixtral" in args.net.lower():
-                    logs = lm.model.model(batch)
-                elif "falcon" in args.model:
-                    logs = lm.model.transformer(batch)
-                hidden_states = logs[0]
-                logits = lm.model.lm_head(hidden_states)
-                shift_logits = logits[:, :-1, :]
-                shift_labels = testenc[:, (i * lm.seqlen) : ((i + 1) * lm.seqlen)][:, 1:].to(lm.model.lm_head.weight.device)
-                loss_fct = nn.CrossEntropyLoss()
-                loss = loss_fct(
-                    shift_logits.view(-1, shift_logits.size(-1)),
-                    shift_labels.view(-1),
-                )
-                neg_log_likelihood = loss.float() * lm.seqlen
-                nlls.append(neg_log_likelihood)
-                if i == args.limit:
-                    break
-
-            ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * lm.seqlen))
-            logger.info(f'{dataset} : {ppl.item()}')
-            lm.model.config.use_cache = use_cache
-            results[dataset] = ppl.item()
-            
-    if args.tasks != "":
-        t_results = evaluator.simple_evaluate(
-            lm,
-            tasks=args.tasks,
-            num_fewshot=args.num_fewshot,
-            limit=None if args.limit == -1 else args.limit,
-        )
-        results.update(t_results)
-        logger.info(results)
-        pprint(results)
-        # for test of MMLU
-        if 'hendrycksTest' in args.tasks:
-            all_cors = []
-            all_cors_norm = []
-            subcat_cors = {subcat: [] for subcat_lists in subcategories.values() for subcat in subcat_lists}
-            cat_cors = {cat: [] for cat in categories}
-            cat_cors_norm = {cat: [] for cat in categories}
-            for key in t_results['results'].keys():
-                if not 'hendrycksTest' in key:
-                    continue
-                subject = key.split('-')[-1]
-                cors = t_results['results'][key]['acc']
-                cors_norm = t_results['results'][key]['acc_norm']
-                subcats = subcategories[subject]
-                for subcat in subcats:
-                    subcat_cors[subcat].append(cors)
-                    for key in categories.keys():
-                        if subcat in categories[key]:
-                            cat_cors[key].append(cors)
-                            cat_cors_norm[key].append(cors_norm)
-                    all_cors.append(cors)
-                    all_cors_norm.append(cors_norm)
-                    
-            for cat in cat_cors:
-                cat_acc = np.mean(cat_cors[cat])
-                logger.info("Average accuracy {:.4f} - {}".format(cat_acc, cat))
-            weighted_acc = np.mean(all_cors)
-            logger.info("Average accuracy: {:.4f}".format(weighted_acc))               
-    return results
-
-
 def main():
     import argparse
 
@@ -207,6 +100,25 @@ def main():
     parser.add_argument("--use_ln_matrix",default=False, action="store_true", help="layernorm vector or matrix")
     parser.add_argument('--sf',"--stability_factor",type=float, default=1.0, help="stability factor for gradual mask")
 
+    # For RPTQ Args
+    parser.add_argument(
+        "--metric", type=str, default="ema_minmax", choices=["minmax", "ema_minmax", "mse", "layer_mse"],
+    )
+    parser.add_argument(
+        "--only_quant_kv", type=bool, default=False, help="only quantize the kv cache",
+    )
+    parser.add_argument("--disable_w_quant", action="store_true")
+    parser.add_argument("--disable_a_quant", action="store_true")
+    parser.add_argument("--R1_clusters", type=int, default=32)
+    parser.add_argument("--R2_clusters", type=int, default=4)
+    parser.add_argument("--R3_clusters", type=int, default=4)
+    parser.add_argument("--R4_clusters", type=int, default=32)
+    parser.add_argument("--R5_clusters", type=int, default=32)
+    parser.add_argument("--reorder", type=str, default="12345", help="like 12345 or 1")
+    parser.add_argument("--w_quantizer", type=str, default="gptq", choices=["gptq", "normal"])
+    parser.add_argument("--limit", type=int, default=-1)
+    parser.add_argument("--only_quant_kv", action="store_true")
+
 
     args = parser.parse_args()
     random.seed(args.seed)
@@ -252,30 +164,35 @@ def main():
         "group_size": args.group_size,
         "lwc":args.lwc,
         "disable_zero_point": args.disable_zero_point
+        "metric": "minimax"
     }
     args.act_quant_params = {
-        "n_bits":  args.abits,
+        "n_bits":  16 if args.only_quant_kv else args.abits,
         "per_channel_axes": [],
         "symmetric": False,
         "dynamic_method": args.a_dynamic_method,
+        "metric": args.metric
     }
     args.q_quant_params = {
-        "n_bits": args.abits,
+        "n_bits": 16 if args.only_quant_kv else args.abits,
         "per_channel_axes": [],
         "symmetric": False,
         "dynamic_method": args.a_dynamic_method,
+        "metric": args.metric
     }
     args.k_quant_params = {
         "n_bits": args.abits,
         "per_channel_axes": [],
         "symmetric": False,
         "dynamic_method": args.a_dynamic_method,
+        "metric": args.metric
     }
     args.v_quant_params = {
         "n_bits": args.abits,
         "per_channel_axes": [],
         "symmetric": False,
         "dynamic_method": args.a_dynamic_method,
+        "metric": args.metric
     }
     args.p_quant_params = {
         "n_bits": 16,
@@ -317,6 +234,7 @@ def main():
         from quantize.omniquant import omniquant
         from models.int_llama_layer import OmniQuantLlamaDecoderLayer
         from models.int_opt_layer import OmniQuantOPTDecoderLayer
+        from eval_ppl_utils import evaluate
 
         tick = time.time()     
         omniquant(
@@ -346,11 +264,15 @@ def main():
                         del module.fc1_smooth_shift           
             lm.model.save_pretrained(args.save_dir)  
             lm.tokenizer.save_pretrained(args.save_dir) 
+        
+        logger.info("=== start evaluation ===")
+        evaluate(lm, args,logger)
 
     elif args.method == "affinequant":
         from quantize.affinequant import affinequant
         from models.int_llama_layer import AffineQuantLlamaDecoderLayer
         from models.int_opt_layer import AffineQuantOPTDecoderLayer
+        from eval_ppl_utils import evaluate
 
         tick = time.time()
         affinequant(
@@ -381,8 +303,89 @@ def main():
             lm.model.save_pretrained(args.save_dir)  
             lm.tokenizer.save_pretrained(args.save_dir) 
 
-    logger.info("=== start evaluation ===")
-    evaluate(lm, args,logger)
+        logger.info("=== start evaluation ===")
+        evaluate(lm, args,logger)
+
+    elif args.method == "lrquant" and args.wbits < 16 or args.abits <16:
+        from quantize.lrquant import lrquant
+        from models.int_llama_layer import LRQuantLlamaDecoderLayer
+        from models.int_opt_layer import LRQuantOPTDecoderLayer
+        from eval_ppl_utils import evaluate_lrquant
+        
+        fp_lm = copy.deepcopy(lm)
+        fp_lm.model.eval()
+        for fp_param in fp_lm.model.parameters():
+            fp_param.requires_grad = False
+        
+        tick = time.time()
+        lrquant(
+            lm, 
+            args, 
+            dataloader, 
+            act_scales, 
+            act_shifts, 
+            logger
+        )   
+        logger.info(time.time() - tick)
+
+        if args.save_dir:
+            logger.info("=== save model ===")
+            # delete omni parameters
+            for name, module in lm.model.named_modules():
+                if isinstance(module, QuantLinear):
+                    del module.weight_quantizer.lowbound_factor
+                    del module.weight_quantizer.upbound_factor
+
+                if isinstance(module,LRQuantLlamaDecoderLayer) or isinstance(module,LRQuantOPTDecoderLayer):
+                    if args.let:
+                        del module.qkv_smooth_scale
+                        del module.qkv_smooth_shift
+                        del module.out_smooth_scale
+                        del module.out_smooth_shift
+                        del module.fc1_smooth_scale
+                        del module.fc1_smooth_shift           
+            lm.model.save_pretrained(args.save_dir)  
+            lm.tokenizer.save_pretrained(args.save_dir)  
+
+        logger.info("=== start evaluation ===")
+        evaluate_lrquant(lm, args,logger, fp_lm)
+
+    elif args.method == "rptq":
+        from quantize.reorderquant import rptq
+        from models.int_llama_layer import RPTQLlamaDecoderLayer
+        from models.int_opt_layer import RPTQOPTDecoderLayer
+        from eval_ppl_utils import evaluate_rptq
+
+        args.layer_norm_out_quant_params = {
+            "n_bits": 16 if args.only_quant_kv else max(8, args.abits),
+            "per_channel_axes": [],
+            "symmetric": False,
+            "metric": args.metric,
+            "dynamic": args.a_dynamic,
+        }
+        n_clusters = {
+            "R1": args.R1_clusters,
+            "R2": args.R2_clusters,
+            "R3": args.R3_clusters,
+            "R4": args.R4_clusters,
+            "R5": args.R5_clusters,
+        }
+        tick = time.time()
+        rptq( 
+            lm,
+            args,
+            dataloader,
+            n_clusters,
+            args.reorder,
+            logger
+        )
+        for layer in lm.model.model.decoder.layers:
+            if hasattr(layer, "set_quant_state"):
+                layer.set_quant_state(
+                    not args.disable_w_quant, not args.disable_a_quant
+                )
+        logger.info(time.time() - tick)
+    
 
 
 if __name__ == "__main__":

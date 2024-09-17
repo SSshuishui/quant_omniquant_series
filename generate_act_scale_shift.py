@@ -18,19 +18,16 @@ try:
 except ImportError:
     print("If want to quantize llave models, you should manually install llava from https://github.com/haotian-liu/LLaVA")
 
-# import pdb
-
-
 
 def get_act_scales(model, dataloader, num_samples=128):
     model.eval()
     device = next(model.parameters()).device
     act_scales = {}
 
-    def stat_tensor(name, tensor):
+    def stat_tensor(name, tensor): #tensor 1*2048*4096
         hidden_dim = tensor.shape[-1]
-        tensor = tensor.view(-1, hidden_dim).abs().detach()
-        comming_max = torch.max(tensor, dim=0)[0].float().cpu()
+        tensor = tensor.view(-1, hidden_dim).abs().detach() #2048*4096
+        comming_max = torch.max(tensor, dim=0)[0].float().cpu() #4096
         if name in act_scales:
             act_scales[name] = torch.max(act_scales[name], comming_max)
         else:
@@ -38,7 +35,7 @@ def get_act_scales(model, dataloader, num_samples=128):
 
     def stat_input_hook(m, x, y, name):
         if isinstance(x, tuple):
-            x = x[0]
+            x = x[0]    #1*2048*4096
         stat_tensor(name, x)
 
     hooks = []
@@ -73,7 +70,7 @@ def get_act_shifts(model, dataloader, num_samples=128):
 
     def stat_input_hook(m, x, y, name):
         if isinstance(x, tuple):
-            x = x[0]
+            x = x[0]  #1*2048*4096
         stat_tensor(name, x)
 
     hooks = []
@@ -105,7 +102,7 @@ def build_model_and_tokenizer(model_name):
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', type=str,
-                        default='/cpfs01/user/chenmengzhao/llama_quantization/llama-hf/llama-7b', help='model name')
+                        default='/data/BaseLLMs/llama3-8b', help='model name')
     parser.add_argument('--scales-output-path', type=str, default='./act_scales/',
                         help='where to save the act scales')
     parser.add_argument('--shifts-output-path', type=str, default='./act_shifts/',

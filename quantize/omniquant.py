@@ -244,7 +244,6 @@ def omniquant(
         if args.resume:
             qlayer.load_state_dict(omni_parameters[i], strict=False)
         
-
         if args.epochs > 0:
             with torch.no_grad():
                 qlayer.float()      # required for AMP training
@@ -296,6 +295,7 @@ def omniquant(
         else:
             register_scales_and_zeros(qlayer)
             layers[i] = qlayer.to("cpu")
+            
         if args.real_quant:
             assert args.wbits in [2,3,4] and args.abits >= 16   # only support weight-only quantization
             named_linears = get_named_linears(qlayer)
