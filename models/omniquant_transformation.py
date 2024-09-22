@@ -146,6 +146,21 @@ def smooth_fc_fc_inplace(fc1, fc2, scales, shifts=None):
         fc2.register_buffer('bias',fc2.weight@shifts)
     fc2.weight.mul_(scales.view(1,-1))
 
+def smooth_fc_fc_inplace_llama3(fc1, fc2, scales, shifts=None):
+    # only support for v_proj and out_proh now.
+    fc1.use_temporary_parameter = False
+    fc2.use_temporary_parameter = False
+
+    fc1.weight.div_(scales)
+    
+    if hasattr(fc2, 'bias') and fc2.bias is not None:
+        fc2.bias.add_(fc2.weight@shifts)
+    else:
+        del fc2.bias
+        fc2.register_buffer('bias', fc2.weight@shifts)
+    fc2.weight.mul_(scales.view(1,-1))
+
+
 def smooth_q_k_inplace(q_proj, k_proj, scales,):
     q_proj.use_temporary_parameter = False
     k_proj.use_temporary_parameter = False
@@ -153,3 +168,10 @@ def smooth_q_k_inplace(q_proj, k_proj, scales,):
     q_proj.bias.div_(scales.view(-1))
     k_proj.weight.mul_(scales.view(-1,1))
     k_proj.bias.mul_(scales.view(-1))
+
+
+def smooth_q_k_inplace_llama3(q_proj, k_proj, scales):
+    q_proj.use_temporary_parameter = False
+    k_proj.use_temporary_parameter = False
+    q_proj.weight.div_(scales.view(-1,1))
+    k_proj.weight.mul_(scales)
