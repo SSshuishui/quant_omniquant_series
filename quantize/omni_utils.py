@@ -66,15 +66,27 @@ def smooth_and_quant_temporary(model, args, isllama):
                 if "smooth_scale" in name:
                     module.data = truncate_number(module)
         if isllama:
-            smooth_ln_fcs_temporary(model.input_layernorm,[model.self_attn.q_proj, model.self_attn.k_proj, model.self_attn.v_proj],
-                                    model.qkv_smooth_scale,model.qkv_smooth_shift)
-            smooth_ln_fcs_temporary(model.post_attention_layernorm,[model.mlp.up_proj,model.mlp.gate_proj],
-                                    model.fc1_smooth_scale,model.fc1_smooth_shift)
-            smooth_fc_fc_temporary(model.self_attn.v_proj,model.self_attn.o_proj,
-                                model.out_smooth_scale, model.out_smooth_shift)
-            smooth_q_k_temporary(model.self_attn.q_proj, model.self_attn.k_proj,
-                                model.qkt_smooth_scale)
-            model.mlp.down_proj.temp_weight = model.mlp.down_proj.weight
+            if args.model_family == 'llama' or args.model_family == 'llama2':
+                smooth_ln_fcs_temporary(model.input_layernorm, [model.self_attn.q_proj, model.self_attn.k_proj, model.self_attn.v_proj],
+                                        model.qkv_smooth_scale, model.qkv_smooth_shift)
+                smooth_ln_fcs_temporary(model.post_attention_layernorm, [model.mlp.up_proj, model.mlp.gate_proj],
+                                        model.fc1_smooth_scale, model.fc1_smooth_shift)
+                smooth_fc_fc_temporary(model.self_attn.v_proj, model.self_attn.o_proj,
+                                    model.out_smooth_scale, model.out_smooth_shift)
+                smooth_q_k_temporary(model.self_attn.q_proj, model.self_attn.k_proj,
+                                    model.qkt_smooth_scale)
+                model.mlp.down_proj.temp_weight = model.mlp.down_proj.weight
+
+            elif args.model_family == 'llama3':
+                smooth_ln_fcs_temporary(model.input_layernorm, [model.self_attn.q_proj, model.self_attn.k_proj, model.self_attn.v_proj],
+                                        model.qkv_smooth_scale, model.qkv_smooth_shift)
+                smooth_ln_fcs_temporary(model.post_attention_layernorm, [model.mlp.up_proj, model.mlp.gate_proj],
+                                        model.fc1_smooth_scale, model.fc1_smooth_shift)
+                smooth_fc_fc_temporary_llama3(model.self_attn.v_proj, model.self_attn.o_proj,
+                                    model.out_smooth_scale, model.out_smooth_shift)
+                smooth_q_k_temporary_llama3(model.self_attn.q_proj, model.self_attn.k_proj,
+                                    model.qkt_smooth_scale)
+                model.mlp.down_proj.temp_weight = model.mlp.down_proj.weight
         else:
             smooth_ln_fcs_temporary(model.self_attn_layer_norm,[model.self_attn.q_proj, model.self_attn.k_proj, model.self_attn.v_proj],
                                     model.qkv_smooth_scale,model.qkv_smooth_shift)

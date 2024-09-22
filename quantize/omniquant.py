@@ -40,6 +40,7 @@ def add_new_module(name, original_module, added_module):
     else:
         setattr(original_module, name, added_module)     
 
+
 def omniquant(
     lm,
     args,
@@ -65,7 +66,7 @@ def omniquant(
         pairs = {
             "q_proj":"qkv",
             "o_proj":"out",
-            "up_proj":"fc1"
+            "up_proj":"fc1",
         }
         layer_name_prefix = "model.layers"
     elif "opt" in args.net.lower():
@@ -174,7 +175,7 @@ def omniquant(
             " Seems that model's attention works without a mask."
         )
         attention_mask_batch = None
-
+    
     loss_func = torch.nn.MSELoss()
     if is_llama:
         position_ids = cache["position_ids"]
@@ -215,9 +216,10 @@ def omniquant(
             with torch.no_grad():
                 with torch.amp.autocast("cuda"):
                     for j in range(args.nsamples):
-                        fp_inps[j] = qlayer(fp_inps[j].unsqueeze(0), attention_mask=attention_mask,position_ids=position_ids)[0]
+                        fp_inps[j] = qlayer(fp_inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
                         if args.aug_loss:
-                            fp_inps_2[j] = qlayer(quant_inps[j].unsqueeze(0), attention_mask=attention_mask,position_ids=position_ids)[0]
+                            fp_inps_2[j] = qlayer(quant_inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+        
         # init smooth parameters
         set_quant_state(qlayer, weight_quant=False, act_quant=True)  # weight will be manually quantized before forward
         qlayer.let = args.let
@@ -226,14 +228,18 @@ def omniquant(
             use_shift = False                   # deactivate channel-wise shifting for llama model and weight-only quantization
         if args.let:
             # init channel-wise scaling and shift
-            qlayer.register_parameter("qkt_smooth_scale",torch.nn.Parameter(torch.ones(layer.self_attn.q_proj.out_features,device=dev, dtype=dtype)))
+            qlayer.register_parameter("qkt_smooth_scale", torch.nn.Parameter(torch.ones(layer.self_attn.q_proj.out_features, device=dev, dtype=dtype)))
             for name,module in qlayer.named_modules():
                 if isinstance(module, QuantLinear):
                     for key in pairs.keys():
                         if key in name:
+                            # print("pairs-key: ", pairs[key])
                             act = act_scales[f"{layer_name_prefix}.{i}.{name}"].to(device=dev, dtype=dtype).clamp(min=1e-5)
-                            weight = module.weight.abs().max(dim=0)[0].clamp(min=1e-5)
-                            scale = (act.pow(args.alpha)/weight.pow(1-args.alpha)).clamp(min=1e-5)
+                            # print("module.weight: ", name, module.weight.shape, module.weight.abs().max(dim=1).values.shape)
+                            weight = module.weight.abs().max(dim=0)[0].clamp(min=1e-5)  # 每一列的最大值进行裁剪（channel-wise）
+                            # print("weight: ", weight.shape)
+                            scale = (act.pow(args.alpha) / weight.pow(1-args.alpha)).clamp(min=1e-5)
+                            # print("scale: ", scale.shape)
                             if use_shift and not is_llama:
                                 shift = act_shifts[f"{layer_name_prefix}.{i}.{name}"].to(device=dev, dtype=dtype)
                             else:
@@ -243,7 +249,7 @@ def omniquant(
                                 
         if args.resume:
             qlayer.load_state_dict(omni_parameters[i], strict=False)
-        
+
         if args.epochs > 0:
             with torch.no_grad():
                 qlayer.float()      # required for AMP training

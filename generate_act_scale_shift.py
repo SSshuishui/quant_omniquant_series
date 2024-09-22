@@ -18,16 +18,40 @@ try:
 except ImportError:
     print("If want to quantize llave models, you should manually install llava from https://github.com/haotian-liu/LLaVA")
 
+net_choices = [
+    "opt-125m",
+    "opt-1.3b",
+    "opt-2.7b",
+    "opt-6.7b",
+    "opt-13b",
+    "opt-30b",
+    "opt-66b",
+    "llama-7b",
+    "llama-13b",
+    "llama-30b",
+    "llama-65b",
+    "Llama-2-7b",
+    "Llama-2-13b",
+    "Llama-2-70b",
+    "Llama-2-7b-chat",
+    "Llama-2-13b-chat",
+    "Llama-3-8b",
+    "Llama-3.1-8b",
+    "llava-llama-2-13b-chat-lightning-preview",
+    "falcon-180b",
+    "falcon-7b",
+    "mixtral-8x7b"]
 
-def get_act_scales(model, dataloader, num_samples=128):
+
+def get_act_scales(model, dataloader, nsamples=128):
     model.eval()
     device = next(model.parameters()).device
     act_scales = {}
 
-    def stat_tensor(name, tensor): #tensor 1*2048*4096
+    def stat_tensor(name, tensor):
         hidden_dim = tensor.shape[-1]
-        tensor = tensor.view(-1, hidden_dim).abs().detach() #2048*4096
-        comming_max = torch.max(tensor, dim=0)[0].float().cpu() #4096
+        tensor = tensor.view(-1, hidden_dim).abs().detach()
+        comming_max = torch.max(tensor, dim=0)[0].float().cpu()
         if name in act_scales:
             act_scales[name] = torch.max(act_scales[name], comming_max)
         else:
@@ -35,7 +59,7 @@ def get_act_scales(model, dataloader, num_samples=128):
 
     def stat_input_hook(m, x, y, name):
         if isinstance(x, tuple):
-            x = x[0]    #1*2048*4096
+            x = x[0]
         stat_tensor(name, x)
 
     hooks = []
@@ -44,16 +68,15 @@ def get_act_scales(model, dataloader, num_samples=128):
             hooks.append(
                 m.register_forward_hook(
                     functools.partial(stat_input_hook, name=name)))
-
-    for i in tqdm(range(num_samples)):
+    
+    for i in tqdm(range(nsamples)):
         model(dataloader[i][0].to(device))
 
     for h in hooks:
         h.remove()
-
     return act_scales
 
-def get_act_shifts(model, dataloader, num_samples=128):
+def get_act_shifts(model, dataloader, nsamples=128):
     model.eval()
     device = next(model.parameters()).device
     act_shifts = {}
@@ -70,7 +93,7 @@ def get_act_shifts(model, dataloader, num_samples=128):
 
     def stat_input_hook(m, x, y, name):
         if isinstance(x, tuple):
-            x = x[0]  #1*2048*4096
+            x = x[0]
         stat_tensor(name, x)
 
     hooks = []
@@ -81,16 +104,14 @@ def get_act_shifts(model, dataloader, num_samples=128):
                     functools.partial(stat_input_hook, name=name))
             )
 
-    for i in tqdm(range(num_samples)):
+    for i in tqdm(range(nsamples)):
         model(dataloader[i][0].to(device))
 
 
     for h in hooks:
         h.remove()
-
+    
     return act_shifts
-
-
 
 
 def build_model_and_tokenizer(model_name):
@@ -99,10 +120,13 @@ def build_model_and_tokenizer(model_name):
     model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
     return model, tokenizer
 
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', type=str,
                         default='/data/BaseLLMs/llama3-8b', help='model name')
+    parser.add_argument("--cache_dir", default="./cache", type=str, 
+                        help="cache dir of dataset, leading to faster debug")
     parser.add_argument('--scales-output-path', type=str, default='./act_scales/',
                         help='where to save the act scales')
     parser.add_argument('--shifts-output-path', type=str, default='./act_shifts/',
@@ -110,8 +134,9 @@ def parse_args():
     parser.add_argument("--calib_dataset",type=str,default="wikitext2",
         choices=["wikitext2", "ptb", "c4", "mix","pile"],
         help="Where to extract calibration data from.",)
-    parser.add_argument('--num-samples', type=int, default=128)
-    parser.add_argument('--seq-len', type=int, default=2048)
+    parser.add_argument('--nsamples', type=int, default=128)
+    parser.add_argument('--seq_len', type=int, default=2048)
+    parser.add_argument("--net", type=str, default=None, choices=net_choices)
     parser.add_argument("--seed", type=int, default=2, help="Seed for sampling the calibration data.")
     args = parser.parse_args()
     return args
@@ -120,29 +145,31 @@ def parse_args():
 @torch.no_grad()
 def main():
     args = parse_args()
+    if args.net is None:
+        args.net = args.model.split('/')[-1]  
+    args.model_family = args.net.split('-')[0]
     model, tokenizer = build_model_and_tokenizer(args.model)
     cache_dataloader = f'{args.cache_dir}/dataloader_{args.model_family}_{args.calib_dataset}_{args.nsamples}.cache'
     if os.path.exists(cache_dataloader):
         print("load calibration from cache")
         dataloader = torch.load(cache_dataloader)
-        logger.info(f"load calibration from {cache_dataloader}")
+        print(f"load calibration from {cache_dataloader}")
     else:
         dataloader, _ = get_loaders(
             args.calib_dataset,
-            nsamples=args.num_samples,
+            nsamples=args.nsamples,
             seed=args.seed,
             model=args.model,
             seqlen=args.seq_len,
         )
         torch.save(dataloader, cache_dataloader)
     
-    args.net = args.model.split('/')[-1]
-    act_scales = get_act_scales(model, dataloader,args.num_samples)
+    act_scales = get_act_scales(model, dataloader,args.nsamples)
     save_path = os.path.join(args.scales_output_path,f'{args.net}.pt')
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     torch.save(act_scales, save_path)
 
-    act_shifts = get_act_shifts(model, dataloader,args.num_samples)
+    act_shifts = get_act_shifts(model, dataloader,args.nsamples)
     save_path = os.path.join(args.shifts_output_path,f'{args.net}.pt')
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     torch.save(act_shifts, save_path)

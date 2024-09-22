@@ -24,6 +24,7 @@ def smooth_ln_fcs_temporary(ln, fcs, scales, mask, shifts, use_ln_matrix=False):
     ln.use_temporary_parameter = True
     if not isinstance(fcs, list):
         fcs = [fcs]
+        
     if use_ln_matrix:
         if hasattr(ln, 'bias') and ln.bias is not None:
             ln.temp_bias = (ln.bias - shifts)
@@ -63,9 +64,6 @@ def smooth_fc_fc_temporary(fc1, fc2, scales, num_heads, mask, shifts=None):
     mask = mask.to(scales.device)
 
     if hasattr(fc1, 'temp_weight'):
-        print("fc1.temp_bias: ", fc1.temp_bias.shape)
-        print("shifts: ", shifts.shape)
-        
         fc1.temp_bias = fc1.temp_bias - shifts
         fc1.temp_bias = fc1.temp_bias.matmul((scales.mul(mask)).inverse())
         fc1.temp_weight = (scales.mul(mask)).inverse().t().matmul(fc1.temp_weight)

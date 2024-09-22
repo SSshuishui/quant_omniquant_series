@@ -61,7 +61,6 @@ class QuantLinear(nn.Module):
         
         out = self.fwd_func(input, weight, bias, **self.fwd_kwargs)
 
-
         return out
 
     def set_quant_state(self, weight_quant: bool = False, act_quant: bool = False):

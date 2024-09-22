@@ -54,7 +54,7 @@ def main():
     parser.add_argument("--method", type=str, help="quantization method")
     parser.add_argument("--cache_dir", default="./cache", type=str, help="cache dir of dataset, leading to faster debug")
     parser.add_argument("--log_dir", default="./log/", type=str, help="direction of logging file")
-    parser.add_argument("--save_dir", default=None, type=str, help="direction for saving parameters and fake quantization model")
+    parser.add_argument("--save_dir", default='./save_pth', type=str, help="direction for saving parameters and fake quantization model")
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--real_quant", default=False, action="store_true", help="real quantization, which can see memory reduce. Note that due to the limitations of AutoGPTQ kernels, the real quantization of weight-only quantization can only lead memory reduction, but with slower inference speed.")
     parser.add_argument("--calib_dataset",type=str,default="wikitext2",
@@ -104,9 +104,6 @@ def main():
     parser.add_argument(
         "--metric", type=str, default="ema_minmax", choices=["minmax", "ema_minmax", "mse", "layer_mse"],
     )
-    parser.add_argument(
-        "--only_quant_kv", type=bool, default=False, help="only quantize the kv cache",
-    )
     parser.add_argument("--disable_w_quant", action="store_true")
     parser.add_argument("--disable_a_quant", action="store_true")
     parser.add_argument("--R1_clusters", type=int, default=32)
@@ -116,8 +113,7 @@ def main():
     parser.add_argument("--R5_clusters", type=int, default=32)
     parser.add_argument("--reorder", type=str, default="12345", help="like 12345 or 1")
     parser.add_argument("--w_quantizer", type=str, default="gptq", choices=["gptq", "normal"])
-    parser.add_argument("--limit", type=int, default=-1)
-    parser.add_argument("--only_quant_kv", action="store_true")
+    parser.add_argument("--only_quant_kv", action="store_true", help="only quantize the kv cache")
 
 
     args = parser.parse_args()
@@ -163,7 +159,7 @@ def main():
         "dynamic_method": args.w_dynamic_method,
         "group_size": args.group_size,
         "lwc":args.lwc,
-        "disable_zero_point": args.disable_zero_point
+        "disable_zero_point": args.disable_zero_point,
         "metric": "minimax"
     }
     args.act_quant_params = {
@@ -262,8 +258,8 @@ def main():
                         del module.out_smooth_shift
                         del module.fc1_smooth_scale
                         del module.fc1_smooth_shift           
-            lm.model.save_pretrained(args.save_dir)  
-            lm.tokenizer.save_pretrained(args.save_dir) 
+            lm.model.save_pretrained(args.save_dir+"/omniquant")  
+            lm.tokenizer.save_pretrained(args.save_dir+"/omniquant") 
         
         logger.info("=== start evaluation ===")
         evaluate(lm, args,logger)
@@ -300,8 +296,8 @@ def main():
                         del module.out_smooth_shift
                         del module.fc1_smooth_scale
                         del module.fc1_smooth_shift           
-            lm.model.save_pretrained(args.save_dir)  
-            lm.tokenizer.save_pretrained(args.save_dir) 
+            lm.model.save_pretrained(args.save_dir+"/affinequant")  
+            lm.tokenizer.save_pretrained(args.save_dir+"/affinequant") 
 
         logger.info("=== start evaluation ===")
         evaluate(lm, args,logger)
@@ -344,8 +340,8 @@ def main():
                         del module.out_smooth_shift
                         del module.fc1_smooth_scale
                         del module.fc1_smooth_shift           
-            lm.model.save_pretrained(args.save_dir)  
-            lm.tokenizer.save_pretrained(args.save_dir)  
+            lm.model.save_pretrained(args.save_dir+"/lrquant")  
+            lm.tokenizer.save_pretrained(args.save_dir+"/lrquant") 
 
         logger.info("=== start evaluation ===")
         evaluate_lrquant(lm, args,logger, fp_lm)
