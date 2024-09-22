@@ -184,3 +184,4 @@ temp.sh
 **/__pycache__
 save_pth/
 quant_omniquant.egg-info/
+*.pth
