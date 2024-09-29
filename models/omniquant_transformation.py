@@ -134,7 +134,7 @@ def smooth_fc_fc_inplace(fc1, fc2, scales, shifts=None):
     # only support for v_proj and out_proh now.
     fc1.use_temporary_parameter = False
     fc2.use_temporary_parameter = False
-
+    
     fc1.bias.sub_(shifts)
     fc1.bias.div_(scales.view(-1))
     fc1.weight.div_(scales.view(-1,1))

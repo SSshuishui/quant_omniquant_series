@@ -22,6 +22,7 @@ class QuantLlamaMLP(nn.Module):
         intermediate_size: int,
         hidden_act: str,
         args=None,
+        block_precision=None
     ):
         super().__init__()
         # self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
@@ -29,13 +30,16 @@ class QuantLlamaMLP(nn.Module):
         # self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
         self.gate_proj = QuantLinear(org_module.gate_proj,
                                            args.weight_quant_params,
-                                           args.act_quant_params)
+                                           args.act_quant_params,
+                                           None if block_precision is None else block_precision['mlp.gate_proj'])
         self.down_proj = QuantLinear(org_module.down_proj,
                                            args.weight_quant_params,
-                                           args.act_quant_params)
+                                           args.act_quant_params,
+                                           None if block_precision is None else block_precision['mlp.down_proj'])
         self.up_proj = QuantLinear(org_module.up_proj,
                                            args.weight_quant_params,
-                                           args.act_quant_params)
+                                           args.act_quant_params,
+                                           None if block_precision is None else block_precision['mlp.up_proj'])
         self.act_fn = ACT2FN[hidden_act]
 
     def forward(self, x):
@@ -48,7 +52,8 @@ class QuantLlamaAttention(nn.Module):
     def __init__(self, 
                  org_module: nn.Module,
                  config: LlamaConfig,
-                 args=None):
+                 args=None,
+                 block_precision=None):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -70,16 +75,19 @@ class QuantLlamaAttention(nn.Module):
             org_module.k_proj,
             args.weight_quant_params,
             args.act_quant_params,
+            None if block_precision is None else block_precision['self_attn.k_proj']
         )
         self.v_proj = QuantLinear(
             org_module.v_proj,
             args.weight_quant_params,
             args.act_quant_params,
+            None if block_precision is None else block_precision['self_attn.v_proj']
         )
         self.q_proj = QuantLinear(
             org_module.q_proj,
             args.weight_quant_params,
             args.act_quant_params,
+            None if block_precision is None else block_precision['self_attn.q_proj']
         )
         self.o_proj = QuantLinear(
             org_module.o_proj, args.weight_quant_params, args.act_quant_params
@@ -189,7 +197,8 @@ class OmniQuantLlamaDecoderLayer(nn.Module):
     def __init__(self, 
                  config: LlamaConfig,
                  ori_layer,
-                 args):
+                 args,
+                 block_precision=None):
         super().__init__()
         from quantize.omni_norm import OmniLlamaRMSNorm
 
@@ -198,13 +207,15 @@ class OmniQuantLlamaDecoderLayer(nn.Module):
             org_module=ori_layer.self_attn,
             config=config,
             args=args,
-            )
+            block_precision=block_precision
+        )
         self.mlp = QuantLlamaMLP(
             org_module=ori_layer.mlp,
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
             args=args,
+            block_precision=block_precision
         )
         self.input_layernorm = OmniLlamaRMSNorm(ori_layer.input_layernorm,eps=ori_layer.input_layernorm.variance_epsilon)
         self.post_attention_layernorm = OmniLlamaRMSNorm(ori_layer.post_attention_layernorm,eps=ori_layer.post_attention_layernorm.variance_epsilon)
@@ -551,7 +562,6 @@ class AffineQuantLlamaDecoderLayer(nn.Module):
         for name, module in self.named_modules():
             if isinstance(module, QuantLinear):
                 module.weight_quantizer.register_scales_and_zeros()
-
 
 
 class LRQuantLlamaDecoderLayer(nn.Module):

@@ -15,17 +15,11 @@ import pdb
 @torch.no_grad()
 def evaluate(lm, args, logger):
     results = {}
-    # if "opt" in args.net.lower():
-    #     lm.model.model.decoder = lm.model.model.decoder.to(lm.device)
-    # elif "llama" in args.net.lower() or "mixtral" in args.net.lower():
-    #     lm.model = lm.model.to(lm.device)
-    # elif "falcon" in args.net.lower():
-    #     lm.model.transformer = lm.model.transformer.to(lm.device)
 
     hf_device_map = lm.model.hf_device_map
     hf_device = f"cuda:{hf_device_map[f'model.layers.{0}']}"
     print("hf_device_map: ", hf_device_map, "hf_device: ", hf_device)
-    
+   
     if args.eval_ppl:
         for dataset in ["wikitext2", "c4", "ptb"]:
             cache_testloader = f'{args.cache_dir}/testloader_{args.model_family}_{dataset}_all.cache'

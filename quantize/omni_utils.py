@@ -127,12 +127,24 @@ def smooth_and_quant_inplace(model, args, isllama):
             if "smooth_scale" in name:
                 module.data = truncate_number(module)
         if isllama:
-            smooth_ln_fcs_inplace(model.input_layernorm,[model.self_attn.q_proj, model.self_attn.k_proj, model.self_attn.v_proj],
+            if args.model_family == 'llama' or args.model_family == 'llama2':
+                smooth_ln_fcs_inplace(model.input_layernorm,[model.self_attn.q_proj, model.self_attn.k_proj, model.self_attn.v_proj],
                                     model.qkv_smooth_scale,model.qkv_smooth_shift)
-            smooth_ln_fcs_inplace(model.post_attention_layernorm,[model.mlp.up_proj,model.mlp.gate_proj],
+                smooth_ln_fcs_inplace(model.post_attention_layernorm,[model.mlp.up_proj,model.mlp.gate_proj],
                                     model.fc1_smooth_scale,model.fc1_smooth_shift)
-            smooth_fc_fc_inplace(model.self_attn.v_proj,model.self_attn.o_proj,
+                smooth_fc_fc_inplace(model.self_attn.v_proj,model.self_attn.o_proj,
                                 model.out_smooth_scale, model.out_smooth_shift)
+                smooth_q_k_inplace(model.self_attn.q_proj, model.self_attn.k_proj,
+                            model.qkt_smooth_scale)
+            elif args.model_family == 'llama3':
+                smooth_ln_fcs_inplace(model.input_layernorm,[model.self_attn.q_proj, model.self_attn.k_proj, model.self_attn.v_proj],
+                                    model.qkv_smooth_scale,model.qkv_smooth_shift)
+                smooth_ln_fcs_inplace(model.post_attention_layernorm,[model.mlp.up_proj,model.mlp.gate_proj],
+                                    model.fc1_smooth_scale,model.fc1_smooth_shift)
+                smooth_fc_fc_inplace_llama3(model.self_attn.v_proj,model.self_attn.o_proj,
+                                model.out_smooth_scale, model.out_smooth_shift)
+                smooth_q_k_inplace_llama3(model.self_attn.q_proj, model.self_attn.k_proj,
+                            model.qkt_smooth_scale)
         else: # opt
             smooth_ln_fcs_inplace(model.self_attn_layer_norm,[model.self_attn.q_proj, model.self_attn.k_proj, model.self_attn.v_proj],
                                     model.qkv_smooth_scale,model.qkv_smooth_shift)
@@ -140,8 +152,8 @@ def smooth_and_quant_inplace(model, args, isllama):
                                     model.fc1_smooth_scale,model.fc1_smooth_shift)
             smooth_fc_fc_inplace(model.self_attn.v_proj,model.self_attn.out_proj,
                                 model.out_smooth_scale, model.out_smooth_shift)
-        smooth_q_k_inplace(model.self_attn.q_proj, model.self_attn.k_proj,
-                            model.qkt_smooth_scale)
+            smooth_q_k_inplace(model.self_attn.q_proj, model.self_attn.k_proj,
+                                model.qkt_smooth_scale)
     for name, module in model.named_modules():
         if isinstance(module, QuantLinear):
             module.weight = module.weight_quantizer(module.weight)

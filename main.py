@@ -62,7 +62,7 @@ def main():
         help="Where to extract calibration data from.")
     parser.add_argument("--nsamples", type=int, default=128, help="Number of calibration data samples.")
     parser.add_argument("--batch_size", type=int, default=1, help="batch size.")
-    parser.add_argument("--seed", type=int, default=2, help="Seed for sampling the calibration data.")
+    parser.add_argument("--seed", type=int, default=0, help="Seed for sampling the calibration data.")
     parser.add_argument("--tasks", default="")
     parser.add_argument("--eval_ppl", action="store_true")
     parser.add_argument("--num_fewshot", type=int, default=0)
@@ -115,6 +115,8 @@ def main():
     parser.add_argument("--w_quantizer", type=str, default="gptq", choices=["gptq", "normal"])
     parser.add_argument("--only_quant_kv", action="store_true", help="only quantize the kv cache")
 
+    # For Slim++ Args
+    parser.add_argument("--block_precision", type=str, default=None)
 
     args = parser.parse_args()
     random.seed(args.seed)
@@ -239,7 +241,7 @@ def main():
             dataloader,
             act_scales,
             act_shifts,
-            logger,
+            logger=logger,
         )
         logger.info(time.time() - tick)
 
@@ -262,7 +264,7 @@ def main():
             lm.tokenizer.save_pretrained(args.save_dir+"/omniquant") 
         
         logger.info("=== start evaluation ===")
-        evaluate(lm, args,logger)
+        evaluate(lm, args, logger)
 
     elif args.method == "affinequant":
         from quantize.affinequant import affinequant
@@ -302,7 +304,7 @@ def main():
         logger.info("=== start evaluation ===")
         evaluate(lm, args,logger)
 
-    elif args.method == "lrquant" and args.wbits < 16 or args.abits <16:
+    elif args.method == "lrquant" and args.wbits < 16 or args.abits < 16:
         from quantize.lrquant import lrquant
         from models.int_llama_layer import LRQuantLlamaDecoderLayer
         from models.int_opt_layer import LRQuantOPTDecoderLayer
@@ -382,8 +384,47 @@ def main():
                 )
         logger.info(time.time() - tick)
     
+    elif args.method == "slim++" and args.wbits < 16 or args.abits < 16:
+        from quantize.omniquant import omniquant
+        from models.int_llama_layer import OmniQuantLlamaDecoderLayer
+        from models.int_opt_layer import OmniQuantOPTDecoderLayer
+        from eval_ppl_utils import evaluate 
 
+        if args.block_precision is None:
+            args.block_precision = f'./SliM-LLM_group-precision/block_precision_{args.group_size}_{str(args.wbits)}bit/{args.net}.pt'
+    
+        tick = time.time()
+        omniquant(
+            lm,
+            args,
+            dataloader,
+            act_scales,
+            act_shifts,
+            block_precision,
+            logger
+        ) 
+        logger.info(time.time() - tick)
 
+        if args.save_dir:
+            logger.info("=== save model ===")
+            # delete omni parameters
+            for name, module in lm.model.named_modules():
+                if isinstance(module, QuantLinear):
+                    del module.weight_quantizer.lowbound_factor
+                    del module.weight_quantizer.upbound_factor
+                if isinstance(module,OmniQuantLlamaDecoderLayer) or isinstance(module,OmniQuantOPTDecoderLayer):
+                    if args.let:
+                        del module.qkv_smooth_scale
+                        del module.qkv_smooth_shift
+                        del module.out_smooth_scale
+                        del module.out_smooth_shift
+                        del module.fc1_smooth_scale
+                        del module.fc1_smooth_shift           
+            lm.model.save_pretrained(args.save_dir+"/omniquant")  
+            lm.tokenizer.save_pretrained(args.save_dir+"/omniquant") 
+        logger.info("=== start evaluation ===")
+        evaluate(lm, args, logger)
+        
 if __name__ == "__main__":
     print(sys.argv)
     main()

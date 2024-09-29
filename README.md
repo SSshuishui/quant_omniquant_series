@@ -5,6 +5,9 @@ Include:
 | OmniQuant | ✅ | ✅ | TODO | ✅ 
 | AffineQuant | ✅ | ✅ | TODO | TODO 
 | LRQuant | TODO | TODO | TODO | TODO 
+| RPTQ | TODO | TODO | TODO | TODO 
+| Slim-Plus | TODO | TODO | TODO | TODO 
+| I-LLM | TODO | TODO | TODO | TODO 
 
 ## Install
 ```
@@ -114,16 +117,18 @@ python main.py \
 ```
 # W4A4 ppl
 python main.py \
---model /PATH/TO/LLaMA3/llama3-8b  \
---epochs 20 --output_dir ./log/llama3-8b-w4a4 \
+--method lrquant \
+--model /PATH/TO/LLaMA3/  \
+--epochs 20 --log_dir ./log/llama3-8b-w4a4 \
 --eval_ppl --wbits 4 --abits 4 --lwc --let \
 ```
 
 ```
 # W4A4 zero-shot
 python main.py \
---model /PATH/TO/LLaMA3/llama3-8b  \
---epochs 20 --output_dir ./log/llama3-8b-w4a4 \
+--method lrquant \
+--model /PATH/TO/LLaMA3/  \
+--epochs 20 --log_dir ./log/llama3-8b-w4a4 \
 --wbits 4 --abits 4 --lwc --let \
 --tasks piqa,arc_easy,arc_challenge,boolq,hellaswag,winogrande
 ```
@@ -131,16 +136,18 @@ python main.py \
 ```
 # W4A4 tta
 python main.py \
---model /PATH/TO/LLaMA3/llama3-8b  \
---epochs 20 --output_dir ./log/llama3-8b-w4a4 \
+--method lrquant \
+--model /PATH/TO/LLaMA3/  \
+--epochs 20 --log_dir ./log/llama3-8b-w4a4 \
 --eval_ppl --wbits 4 --abits 4 --lwc --let --tta\
 ```
 
 ### For RPTQ
 ```
 python main.py \
---model /PATH/TO/LLaMA3/llama3-8b  \
---output_dir ./log/llama3-8b-w4a4 \
+--method rptq \
+--model /PATH/TO/LLaMA3/  \
+--log_dir ./log/llama3-8b-w4a4 \
 --eval_ppl --wbits 4 --abits 4 \
 --tasks lambada_openai,piqa,arc_easy,arc_challenge,openbookqa,boolq
 ```
@@ -148,11 +155,50 @@ python main.py \
 Only quantize KV cache
 ```
 python main.py \
---model /PATH/TO/LLaMA3/llama3-8b  \
+--method rptq \
+--model /PATH/TO/LLaMA3/  \
+--log_dir ./log/llama3-8b-kv \
 --wbits 4 --abits 4 --only_quant_kv \
 --eval_ppl --tasks lambada_openai,piqa,arc_easy,arc_challenge,openbookqa,boolq
 ```
 
+
+### For Slim++
+```
+# W2A16G128
+python main.py \
+--method slim++ \
+--model /PATH/TO/LLaMA3/ \
+--eval_ppl \
+--epochs 50 --log_dir ./log/llama3-8b-w2a16g128 \
+--wbits 2 --abits 16 --group_size 128 --lwc \
+--tasks piqa,arc_easy,arc_challenge,boolq,hellaswag,winogrande
+
+python main.py \
+--method slim++ \
+--model /PATH/TO/LLaMA3/ \
+--eval_ppl \
+--epochs 50 --log_dir ./log/llama3-8b-w2a16g128 \
+--wbits 2 --abits 16 --group_size 128 --lwc --aug_loss
+```
+
+```
+# W3A16G128
+python main.py \
+--method slim++ \
+--model /PATH/TO/LLaMA3/ \
+--eval_ppl \
+--epochs 50 --log_dir ./log/llama3-8b-w3a16g128 \
+--wbits 3 --abits 16 --group_size 128 --lwc \
+--tasks piqa,arc_easy,arc_challenge,boolq,hellaswag,winogrande
+
+python main.py \
+--method slim++ \
+--model /PATH/TO/LLaMA3/ \
+--eval_ppl \
+--epochs 50 --log_dir ./log/llama3-8b-w3a16g128 \
+--wbits 3 --abits 16 --group_size 128 --lwc --aug_loss
+```
 
 More detailed and optional arguments:
 - `--model`: the local model path or huggingface format.

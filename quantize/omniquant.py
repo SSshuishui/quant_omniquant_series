@@ -47,6 +47,7 @@ def omniquant(
     dataloader,
     act_scales,
     act_shifts,
+    block_precision=None,
     logger=None,
 ):
     logger.info("Starting ...")
@@ -204,10 +205,16 @@ def omniquant(
             qlayer = copy.deepcopy(layer)
             for name, module in qlayer.named_modules():
                 if isinstance(module,torch.nn.Linear) and not "gate" in name:       # do not quantize gate
-                    quantlinear = QuantLinear(module, args.weight_quant_params, args.act_quant_params)
+                    if args.method == "slim++":
+                        quantlinear = QuantLinear(module, args.weight_quant_params, args.act_quant_params, block_precision[i][name])
+                    else:
+                        quantlinear = QuantLinear(module, args.weight_quant_params, args.act_quant_params)
                     add_new_module(name, qlayer, quantlinear)    
         else:
-            qlayer = DecoderLayer(lm.model.config, layer, args)
+            if args.method == "slim++":
+                qlayer = DecoderLayer(lm.model.config, layer, args, block_precision[i])
+            else:
+                qlayer = DecoderLayer(lm.model.config, layer, args)
         qlayer = qlayer.to(hf_device)
         
         # obtain output of full-precision model
@@ -228,20 +235,20 @@ def omniquant(
             use_shift = False                   # deactivate channel-wise shifting for llama model and weight-only quantization
         if args.let:
             # init channel-wise scaling and shift
-            qlayer.register_parameter("qkt_smooth_scale", torch.nn.Parameter(torch.ones(layer.self_attn.q_proj.out_features, device=dev, dtype=dtype)))
+            qlayer.register_parameter("qkt_smooth_scale", torch.nn.Parameter(torch.ones(layer.self_attn.q_proj.out_features, device=hf_device, dtype=dtype)))
             for name,module in qlayer.named_modules():
                 if isinstance(module, QuantLinear):
                     for key in pairs.keys():
                         if key in name:
                             # print("pairs-key: ", pairs[key])
-                            act = act_scales[f"{layer_name_prefix}.{i}.{name}"].to(device=dev, dtype=dtype).clamp(min=1e-5)
+                            act = act_scales[f"{layer_name_prefix}.{i}.{name}"].to(device=hf_device, dtype=dtype).clamp(min=1e-5)
                             # print("module.weight: ", name, module.weight.shape, module.weight.abs().max(dim=1).values.shape)
                             weight = module.weight.abs().max(dim=0)[0].clamp(min=1e-5)  # 每一列的最大值进行裁剪（channel-wise）
                             # print("weight: ", weight.shape)
                             scale = (act.pow(args.alpha) / weight.pow(1-args.alpha)).clamp(min=1e-5)
                             # print("scale: ", scale.shape)
                             if use_shift and not is_llama:
-                                shift = act_shifts[f"{layer_name_prefix}.{i}.{name}"].to(device=dev, dtype=dtype)
+                                shift = act_shifts[f"{layer_name_prefix}.{i}.{name}"].to(device=hf_device, dtype=dtype)
                             else:
                                 shift = torch.zeros_like(scale)
                             qlayer.register_parameter(f"{pairs[key]}_smooth_shift",torch.nn.Parameter(shift))

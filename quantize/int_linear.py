@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from quantize.quantizer import UniformAffineQuantizer
+from quantize.mixed_quantizer import MixUniformAffineQuantizer
 
 
 class QuantLinear(nn.Module):
@@ -14,6 +15,7 @@ class QuantLinear(nn.Module):
         org_module: nn.Linear,
         weight_quant_params: dict = {},
         act_quant_params: dict = {},
+        block_precisions=None,
         disable_input_quant=False,
     ):
         super().__init__()
@@ -34,7 +36,11 @@ class QuantLinear(nn.Module):
         self.mem_packer = None
         # initialize quantizer
         self.i_cluster_counts = None
-        self.weight_quantizer = UniformAffineQuantizer(**weight_quant_params, shape=org_module.weight.shape)
+        if block_precisions == None:
+            self.weight_quantizer = UniformAffineQuantizer(**weight_quant_params, shape=org_module.weight.shape)
+        else:
+            self.weight_quantizer = MixUniformAffineQuantizer(**weight_quant_params,shape=org_module.weight.shape, block_precisions=block_precisions)
+
         if not disable_input_quant:
             self.act_quantizer = UniformAffineQuantizer(**act_quant_params)
         else:
