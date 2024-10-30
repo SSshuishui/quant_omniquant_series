@@ -2,18 +2,13 @@ from regex import I
 import torch
 import torch.nn as nn
 
-
-
 CLIPMIN = 1e-5
-
-
 
 def round_ste(x: torch.Tensor):
     """
     Implement Straight-Through Estimator for rounding operation.
     """
     return (x.round() - x).detach() + x
-
 
 
 class MixUniformAffineQuantizer(nn.Module):

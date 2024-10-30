@@ -13,38 +13,9 @@ from tqdm import tqdm
 import utils
 from pathlib import Path
 from categories import subcategories, categories
-
 from quantize.int_linear import QuantLinear
 
-import pdb
-
-
 torch.backends.cudnn.benchmark = True
-
-net_choices = [
-    "opt-125m",
-    "opt-1.3b",
-    "opt-2.7b",
-    "opt-6.7b",
-    "opt-13b",
-    "opt-30b",
-    "opt-66b",
-    "llama-7b",
-    "llama-13b",
-    "llama-30b",
-    "llama-65b",
-    "Llama-2-7b",
-    "Llama-2-13b",
-    "Llama-2-70b",
-    "Llama-2-7b-chat",
-    "Llama-2-13b-chat",
-    "Llama-3-8b",
-    "Llama-3.1-8b",
-    "llava-llama-2-13b-chat-lightning-preview",
-    "falcon-180b",
-    "falcon-7b",
-    "mixtral-8x7b"]
-
 
 def main():
     import argparse
@@ -79,24 +50,20 @@ def main():
     parser.add_argument("--aug_loss", default=False, action="store_true", help="calculate additional loss with same input")
     parser.add_argument("--symmetric",default=False, action="store_true", help="symmetric quantization")
     parser.add_argument("--disable_zero_point",default=False, action="store_true", help="quantization without zero_point")
-    parser.add_argument("--a_dynamic_method", type=str, default="per_token", choices=["per_token"])
-    parser.add_argument("--w_dynamic_method", type=str, default="per_channel", choices=["per_channel"])
+    parser.add_argument("--a_dynamic_method", type=str, default="per_token", choices=["per_token", "per_channel", "per_tensor", "per_cluster"])
+    parser.add_argument("--w_dynamic_method", type=str, default="per_channel", choices=["per_channel", "per_tensor"])
     parser.add_argument("--limit", type=int, default=-1)
     parser.add_argument("--deactive_amp", action="store_true", help="deactivate AMP when 8<=bits<16")
-    parser.add_argument("--net", type=str, default=None, choices=net_choices)
+    parser.add_argument("--net", type=str, default=None)
     parser.add_argument("--act-scales", type=str, default=None)
     parser.add_argument("--act-shifts", type=str, default=None)
 
     # For Omniquant Args
-    parser.add_argument(
-        "--attn_implementation",
-        type=str, required=False, default="eager",
-        choices=["eager", "sdpa", "flash_attention_2"],
-        help="attention implementation that the model works with",
-    )
+    parser.add_argument("--attn_implementation", type=str, required=False, default="eager", choices=["eager", "sdpa", "flash_attention_2"], help="attention implementation that the model works with")
     
     # For AffineQuant Args
     parser.add_argument("--use_matrix", default=False, action="store_true", help="qkt affine mateix or not")
+
     parser.add_argument("--use_ln_matrix",default=False, action="store_true", help="layernorm vector or matrix")
     parser.add_argument('--sf',"--stability_factor",type=float, default=1.0, help="stability factor for gradual mask")
 
@@ -117,6 +84,19 @@ def main():
 
     # For Slim++ Args
     parser.add_argument("--block_precision", type=str, default=None)
+
+    # For I-LLM Args
+    parser.add_argument("--lsq",default=False, action="store_true", help="关注round_loss")
+    parser.add_argument("--scheduler",default=False, action="store_true", help="是否引入scheduler来帮助收敛")
+    parser.add_argument("--loss",default="MSELoss",type=str, help="用来确定重建loss哪一种比较好")
+    parser.add_argument("--fully_quant",default=False,action="store_true")
+    parser.add_argument("--rescale",default=False, action="store_true", help="rescale o_channel")
+    parser.add_argument("--rescale_limit",default=False,action="store_true")
+    parser.add_argument("--grad_norm",default=None, type=float, help="-1 means don't use grad norm")
+    parser.add_argument("--std_norm",default=False, action="store_true", help="use std to norm per-channel's distribution")
+    parser.add_argument("--illm",default=False, action="store_true", help="use integer's to calculate")
+    parser.add_argument("--illm_norm16",default=False, action="store_true", help="use integer's to calculate")
+
 
     args = parser.parse_args()
     random.seed(args.seed)
@@ -162,7 +142,10 @@ def main():
         "group_size": args.group_size,
         "lwc":args.lwc,
         "disable_zero_point": args.disable_zero_point,
-        "metric": "minimax"
+        "metric": "minimax",
+        "rescale":args.rescale,
+        "rescale_limit":args.rescale_limit,
+        "lsq":args.lsq,
     }
     args.act_quant_params = {
         "n_bits":  16 if args.only_quant_kv else args.abits,
@@ -196,6 +179,36 @@ def main():
         "n_bits": 16,
         "metric": "fix0to1",
     }
+
+    # I-LLM
+    args.norm_quant_params = dict(
+        n_bits=16,
+        symmetric=args.symmetric,
+        metric="minmax",
+        dynamic_method = "per_channel",
+        disable_zero_point=args.disable_zero_point
+    )
+    args.add_quant_params = dict(
+        n_bits=16,
+        symmetric=args.symmetric,
+        metric="minmax",
+        dynamic_method = "per_channel",
+        disable_zero_point=args.disable_zero_point
+    )
+    args.softmax_quant_params = dict(
+        n_bits = 16,
+        symmetric = args.symmetric,
+        metric = "minmax",
+        dynamic_method = "per_token",
+        disable_zero_point=args.disable_zero_point
+    )
+    args.swiglu_quant_params = dict(
+        n_bits = 8,
+        symmetric = args.symmetric,
+        metric = "minmax",
+        dynamic_method = "per_token",
+        disable_zero_point=args.disable_zero_point
+    )
 
     # act scales and shifts
     if args.act_scales is None:
@@ -424,6 +437,43 @@ def main():
             lm.tokenizer.save_pretrained(args.save_dir+"/omniquant") 
         logger.info("=== start evaluation ===")
         evaluate(lm, args, logger)
+
+    elif args.method == "illm" and args.wbits >= 16 or args.abits >= 16:
+        tick = time.time()
+        from quantize.illm import illm  
+        from models.int_llama_layer import IllmLlamaDecoderLayer
+        from models.int_opt_layer import IllmOPTDecoderLayer
+        from eval_ppl_utils import evaluate_illm
+
+        FSBR( 
+            lm,
+            args,
+            dataloader,
+            act_scales,
+            act_shifts,
+            logger
+        )
+        logger.info(time.time() - tick)
+        if args.save_dir:
+        # delete fsbr parameters
+            for name, module in lm.model.named_modules():
+                if isinstance(module, QuantLinear):
+                    del module.weight_quantizer.lowbound_factor
+                    del module.weight_quantizer.upbound_factor
+                if isinstance(module,QuantLlamaDecoderLayer) or isinstance(module,QuantOPTDecoderLayer):
+                    if args.let:
+                        del module.qkv_smooth_scale
+                        del module.qkv_smooth_shift
+                        del module.out_smooth_scale
+                        del module.out_smooth_shift
+                        del module.fc1_smooth_scale
+                        del module.fc1_smooth_shift           
+            lm.model.save_pretrained(args.save_dir)  
+            lm.tokenizer.save_pretrained(args.save_dir) 
+        
+        logger.info("=== start evaluation ===")
+        evaluate_illm(lm, args, logger)
+
         
 if __name__ == "__main__":
     print(sys.argv)

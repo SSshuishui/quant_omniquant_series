@@ -254,15 +254,15 @@ class OmniQuantOPTDecoderLayer(nn.Module):
         )
         self.fc1 = QuantLinear(
             ori_layer.fc1,
-            weight_quant_params=args.weight_quant_params,
-            act_quant_params=args.act_quant_params,
-            None if decoderlayer_precision is None else block_precision=decoderlayer_precision["fc1"]
+            weight_quant_params = args.weight_quant_params,
+            act_quant_params = args.act_quant_params,
+            block_precision = decoderlayer_precision["fc1"] if decoderlayer_precision is not None else None
         )
         self.fc2 = QuantLinear(
             ori_layer.fc2,
             weight_quant_params=args.weight_quant_params,
             act_quant_params=args.act_quant_params,
-            None if decoderlayer_precision is None else block_precision=decoderlayer_precision["fc2"]
+            block_precision = decoderlayer_precision["fc2"] if decoderlayer_precision is not None else None
         )
         self.final_layer_norm = OmniLayerNorm(
             ori_layer.final_layer_norm

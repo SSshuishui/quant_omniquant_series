@@ -10,8 +10,8 @@ import gc
 from quantize.int_linear import QuantLinear
 from quantize.int_matmul import QuantMatMul
 from quantize.reorder_layer_norm import ReorderLayerNorm
-from models.int_opt_layer import LRQuantOPTDecoderLayer
-from models.int_llama_layer import LRQuantLlamaDecoderLayer
+from models.int_opt_layer import RPTQOPTDecoderLayer
+from models.int_llama_layer import RPTQLlamaDecoderLayer
 from quantize.quant_transformer_layer import quant_layer
 from quantize.reorder_utils import (
     tensor_calc_reorder_index,

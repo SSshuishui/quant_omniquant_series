@@ -48,11 +48,11 @@ def evaluate(lm, args, logger):
             for i in tqdm(range(nsamples)):
                 batch = testenc[:, (i * lm.seqlen) : ((i + 1) * lm.seqlen)].to(hf_device)
                 if "opt" in args.net.lower():
-                    logs = lm.model.model.decoder(batch)
+                    logs = lm.model.model.decoder(batch.to(hf_device))
                 elif "llama" in args.net.lower() or "mixtral" in args.net.lower():
-                    logs = lm.model.model(batch)
+                    logs = lm.model.model(batch.to(hf_device))
                 elif "falcon" in args.model:
-                    logs = lm.model.transformer(batch)
+                    logs = lm.model.transformer(batch.to(hf_device))
                 hidden_states = logs[0]
                 logits = lm.model.lm_head(hidden_states)
                 shift_logits = logits[:, :-1, :]

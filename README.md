@@ -3,8 +3,8 @@ Include:
 | Methods | Quantize | PPL Eval | Task Eval | Save |
 | :--- | ---: | :---: | :---: | :---: 
 | OmniQuant | ✅ | ✅ | TODO | ✅ 
-| AffineQuant | ✅ | ✅ | TODO | TODO 
-| LRQuant | TODO | TODO | TODO | TODO 
+| AffineQuant | ✅ | ✅ | TODO | ✅ 
+| LRQuant | ✅ | ✅ | TODO | ✅ 
 | RPTQ | TODO | TODO | TODO | TODO 
 | Slim-Plus | TODO | TODO | TODO | TODO 
 | I-LLM | TODO | TODO | TODO | TODO 
@@ -200,6 +200,29 @@ python main.py \
 --wbits 3 --abits 16 --group_size 128 --lwc --aug_loss
 ```
 
+### For I-LLM
+#FSBR (Fully-Smooth Block-Reconstruction)
+```
+python main.py \
+--method illm \
+--model /PATH/TO/LLaMA3/ \
+--eval_ppl \
+--epochs 20 --output_dir ./log/Llama2-7b_w4a8 \
+--wbits 4 --abits 4 --lwc --let \
+--fully_quant
+```
+# Interger-only inference
+```
+python main.py \
+--method illm \
+--model /PATH/TO/LLaMA3/ \
+--eval_ppl \
+--epochs 0 --output_dir ./log/Llama2-7b_w4a8/fsbr_parameters.pt \
+--wbits 4 --abits 4 --lwc --let \
+--fully_quant --illm
+```
+
+
 More detailed and optional arguments:
 - `--model`: the local model path or huggingface format.
 - `--wbits`: weight quantization bits.
@@ -222,12 +245,6 @@ More detailed and optional arguments:
 
 ## Related Project
 [SmoothQuant: Accurate and Efficient Post-Training Quantization for Large Language Models](https://github.com/mit-han-lab/smoothquant)
-
-[AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration](https://github.com/mit-han-lab/llm-awq)
-
-[GPTQ: Accurate Post-training Compression for Generative Pretrained Transformers](https://github.com/IST-DASLab/gptq)
-
-[AutoGPTQ](https://github.com/PanQiWei/AutoGPTQ)
 
 [OmniQuant:Omnidirectionally Calibrated Quantization for Large Language Models](https://github.com/OpenGVLab/OmniQuant)
 

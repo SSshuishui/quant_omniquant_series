@@ -42,11 +42,15 @@ class UniformAffineQuantizer(nn.Module):
         per_channel_axes=[],
         metric="minmax",
         dynamic=False,
-        dynamic_method="per_cluster",
+        dynamic_method="per_tensor",
         group_size=None,
         shape=None,
         lwc=False,
         disable_zero_point=False,
+        # I-LLM
+        rescale=False,
+        rescale_limit=False,
+        lsq = False,
     ):
         """
         support cluster quantize
@@ -79,6 +83,10 @@ class UniformAffineQuantizer(nn.Module):
         self.deficiency = 0
         self.lwc = lwc
 
+        self.rescale = rescale # for channel-rescale
+        self.rescale_limit = rescale_limit
+        self.lsq = lsq
+
         self.mode = "calibration"
         self.recorded_quant_input=None
         
@@ -94,6 +102,13 @@ class UniformAffineQuantizer(nn.Module):
                 dim1 = shape[0]
             self.upbound_factor = nn.Parameter(torch.ones((dim1,1))*init_value)
             self.lowbound_factor = nn.Parameter(torch.ones((dim1,1))*init_value)
+
+        if rescale:
+            if rescale_limit:
+                self.rescale_param = nn.Parameter(torch.zeros(dim1,1) )
+            else:
+                self.rescale_param = nn.Parameter(torch.ones(dim1,1) )
+
         self.sigmoid = nn.Sigmoid()
 
         self.enable = True
@@ -143,18 +158,36 @@ class UniformAffineQuantizer(nn.Module):
             assert len(x.shape)==2, "only support linear layer now"
             dim1, dim2 = x.shape
             x = x.reshape(-1, self.group_size)
-        x_int = round_ste(x / scale)
-        if round_zero_point is not None:
-            x_int = x_int.add(round_zero_point)
-        x_int = x_int.clamp(self.qmin, self.qmax)
-        x_dequant = x_int
-        if round_zero_point is not None:
-            x_dequant = x_dequant.sub(round_zero_point)
-        x_dequant = x_dequant.mul(scale)
+        
+        if self.lsq:
+            if self.lwc:
+                x = x.clone()
+                x.data.clamp_(self.xmin_tmp,self.xmax_tmp)
+
+            grad_factor = 1.
+            x_dequant = torch._fake_quantize_learnable_per_channel_affine(x,scale.reshape(-1),round_zero_point.reshape(-1),0,self.qmin,self.qmax,grad_factor=grad_factor)
+        
+        else:
+            x_int = round_ste(x / scale)
+            if round_zero_point is not None:
+                x_int = x_int.add(round_zero_point)
+            x_int = x_int.clamp(self.qmin, self.qmax)
+            x_dequant = x_int
+            if round_zero_point is not None:
+                x_dequant = x_dequant.sub(round_zero_point)
+            x_dequant = x_dequant.mul(scale)
+
         if self.group_size:
             x_dequant = x_dequant.reshape(dim1, dim2)
         if self.deficiency > 0:
             x_dequant = x_dequant[:,:-self.deficiency]
+        
+        if self.rescale:
+            rescale_param = self.rescale_param
+            if self.rescale_limit:
+                rescale_param = 0.5 + F.sigmoid(rescale_param)
+            x_dequant = x_dequant*rescale_param
+
         return x_dequant
     
 
@@ -167,10 +200,10 @@ class UniformAffineQuantizer(nn.Module):
         if self.dynamic_method == "per_token" or self.dynamic_method == "per_channel":
             self.per_token_dynamic_calibration(x)
         elif self.dynamic_method == "per_cluster" or self.mode == "calibration":
-                self.calibration(x)  
-                return x  
-        else:
-            raise NotImplementedError()   
+            self.calibration(x)  
+            return x  
+        elif self.dynamic_method == "per_tensor":
+            self.per_tensor_calibration(x)
 
         x_dequant = self.fake_quant(x, self.scale, self.round_zero_point)
         return x_dequant
@@ -184,7 +217,17 @@ class UniformAffineQuantizer(nn.Module):
                 pad_zeros = torch.zeros((x.shape[0],self.deficiency),dtype=x.dtype,device=x.device)
                 x = torch.cat((x,pad_zeros),dim=1)
                 x = x.reshape(-1,self.group_size)
-        reduce_shape = [-1]
+        
+        if self.dynamic_method == "per_channel":
+            if len(self.per_channel_axes):
+                assert len(self.per_channel_axes) == 1,"must be one"
+                reduce_shape = list(range(x.dim()))
+                reduce_shape.remove(self.per_channel_axes[0])
+            else:
+                reduce_shape = list(range(x.dim()-1))
+        else:
+            reduce_shape = [-1]
+
         xmin = x.amin(reduce_shape, keepdim=True)
         xmax =  x.amax(reduce_shape, keepdim=True)
         if self.lwc:
@@ -196,8 +239,8 @@ class UniformAffineQuantizer(nn.Module):
             self.scale = scale.clamp(min=CLIPMIN, max=1e4)
             zero_point = (2**(self.n_bits-1)-1)*torch.ones_like(self.scale)
         else:
-            range = xmax - xmin
-            scale = range / (2**self.n_bits-1)
+            dynamic_range = xmax - xmin
+            scale = dynamic_range / (2**self.n_bits-1)
             self.scale = scale.clamp(min=CLIPMIN, max=1e4)
             zero_point = -(xmin) / (self.scale)
         if self.disable_zero_point:
@@ -205,6 +248,7 @@ class UniformAffineQuantizer(nn.Module):
         else:
             self.round_zero_point = zero_point.clamp(min=-1e4, max=1e4).round()
     
+    # RPTQ
     def calibration(self, x: torch.Tensor):
         reduce_axes = [
             _
@@ -237,7 +281,8 @@ class UniformAffineQuantizer(nn.Module):
                     breakpoint()
         if x.size(0) == 1:
             self.pack_dim = 1
-
+     
+    # RPTQ
     def minmax_calibration(self, x, reduce_axes):
         # minmax
         if self.symmetric:
@@ -291,6 +336,7 @@ class UniformAffineQuantizer(nn.Module):
             zero_point = (xmax + xmin) * (-0.5 / scale)
             return scale, zero_point
 
+    # RPTQ
     def mse_calibration(self, x, reduce_axes):
         # mse
         if self.symmetric:
@@ -338,6 +384,22 @@ class UniformAffineQuantizer(nn.Module):
             zero_point = best_zero_point
         scale.clamp_(min=1e-6, max=1e4)
         return scale, zero_point
+
+    # I-LLM
+    def per_tensor_calibration(self,x):
+        xmin = x.min()
+        xmax = x.max()
+        if self.symmetric or self.disable_zero_point:
+            abs_max = torch.max(xmax.abs(), xmin.abs())
+            scale = abs_max / (2 ** (self.n_bits - 1) - 1)
+            self.scale = scale.clamp(min=CLIPMIN, max=1e4)
+            self.round_zero_point = None
+        else:
+            range = xmax - xmin
+            scale = range / (2**self.n_bits - 1)
+            self.scale = scale.clamp(min=CLIPMIN, max=1e4)
+            zero_point = -(xmin) / (self.scale)
+            self.round_zero_point = zero_point.clamp(min=-1e4, max=1e4).round()
 
     def layer_mse_param_search_update(
         self, qlayer, a_quantizers, inps, outs, attention_mask, steps=10
@@ -442,6 +504,67 @@ class UniformAffineQuantizer(nn.Module):
             quantizer.n_bits = n_bits
         self.quantizers_nbit_dict = None
 
+    # I-LLM
+    def normal_quantize(self, x, scales: torch.Tensor, mig_cof: torch.Tensor):
+        s = (scales / mig_cof).max()
+        s = s / (2**self.n_bits - 1)
+        self.scale = s
+        # only support symmetric quantization
+        self.round_zero_point = None
+        
+    def scale_frexp(self):
+        k = 16
+        m = (self.scale*(2**k)).round()
+        self.scale = m*(2**(-k))
+        
+        return self.scale
+
+    def quant2int(self, x):
+        if self.n_bits >= 16 or not self.enable:
+            return x
+        if self.metric == "fix0to1":
+            return x.mul_(2**self.n_bits - 1).round_().div_(2**self.n_bits - 1)
+
+        if self.deficiency > 0:
+            pad_zeros = torch.zeros(
+                (x.shape[0], self.deficiency), dtype=x.dtype, device=x.device
+            )
+            x = torch.cat((x, pad_zeros), dim=1)
+
+        if self.group_size:
+            assert len(x.shape) == 2, "only support linear layer now"
+            dim1, dim2 = x.shape
+            x = x.reshape(-1, self.group_size)
+        x_int = round_ste(x / self.scale)
+        if self.round_zero_point is not None:
+            x_int = x_int.add(self.round_zero_point)
+        x_int = x_int.clamp(self.qmin, self.qmax)
+        
+        if self.group_size:
+            x_int = x_
+
+    def illm_dequant(self, x_int):
+        if self.group_size:
+            assert len(x_int.shape) == 2, "only support linear layer now"
+            dim1, dim2 = x_int.shape
+            x_int = x_int.reshape(-1, self.group_size)
+            
+        x_dequant = x_int
+        if self.round_zero_point is not None:
+            x_dequant = x_dequant.sub(self.round_zero_point)
+        x_dequant = x_dequant.mul(self.scale)
+        if self.group_size:
+            x_dequant = x_dequant.reshape(dim1, dim2)
+        if self.deficiency > 0:
+            x_dequant = x_dequant[:, : -self.deficiency]
+
+        if self.rescale:
+            rescale_param = self.rescale_param
+            if self.rescale_limit:
+                rescale_param = F.sigmoid(rescale_param) + 0.5
+            x_dequant = x_dequant*self.rescale_param
+        return x_dequant
+    
 
     def register_scales_and_zeros(self):
         self.register_buffer('scales', self.scale)

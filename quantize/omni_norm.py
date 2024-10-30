@@ -1,12 +1,9 @@
 import torch
 import torch.nn as nn
 
-
 '''
 Modify normalization layer to adapt the training of learnable equivalent transformation
 '''
-
-
 
 class OmniLayerNorm(nn.Module):
     def __init__(self, ori_layer_norm) -> None:
