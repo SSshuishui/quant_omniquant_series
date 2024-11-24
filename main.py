@@ -1,18 +1,20 @@
 import os
 import sys
 import random
+import copy
 import numpy as np
-from models.LMClass import LMClass
-import torch
 import time
-from datautils import get_loaders
-from lm_eval import evaluator
-from pprint import pprint
+
+import torch
 import torch.nn as nn
 from tqdm import tqdm
-import utils
 from pathlib import Path
+
+from datautils import get_loaders
+from models.LMClass import LMClass
 from categories import subcategories, categories
+
+import utils
 from quantize.int_linear import QuantLinear
 
 torch.backends.cudnn.benchmark = True
@@ -68,9 +70,7 @@ def main():
     parser.add_argument('--sf',"--stability_factor",type=float, default=1.0, help="stability factor for gradual mask")
 
     # For RPTQ Args
-    parser.add_argument(
-        "--metric", type=str, default="ema_minmax", choices=["minmax", "ema_minmax", "mse", "layer_mse"],
-    )
+    parser.add_argument("--metric", type=str, default="ema_minmax", choices=["minmax", "ema_minmax", "mse", "layer_mse"])
     parser.add_argument("--disable_w_quant", action="store_true")
     parser.add_argument("--disable_a_quant", action="store_true")
     parser.add_argument("--R1_clusters", type=int, default=32)
@@ -97,6 +97,13 @@ def main():
     parser.add_argument("--illm",default=False, action="store_true", help="use integer's to calculate")
     parser.add_argument("--illm_norm16",default=False, action="store_true", help="use integer's to calculate")
 
+    # For DuQuant
+    parser.add_argument("--max_rotation_step", type=int, default=256, help="max steps for rotation transformation")
+    parser.add_argument("--permutation_times", type=int, default=1, help="times of permutation transformation")
+    parser.add_argument("--lac", type=float, default=None, help="activation clipping ratio")
+    parser.add_argument("--swc", type=float, default=None, help="weight clipping ratio, enable withou lwc")
+    parser.add_argument("--block_size", type=int, default=128, help="block size for rotation matrices")
+
 
     args = parser.parse_args()
     random.seed(args.seed)
@@ -117,6 +124,7 @@ def main():
     args.model_family = args.net.split('-')[0]
 
     # init logger
+    args.log_dir = f"{args.log_dir}/{args.method}-{args.model.split('/')[-1]}-w{args.wbits}a{args.abits}"
     if args.log_dir:
         Path(args.log_dir).mkdir(parents=True, exist_ok=True)
     if args.cache_dir:
@@ -146,27 +154,43 @@ def main():
         "rescale":args.rescale,
         "rescale_limit":args.rescale_limit,
         "lsq":args.lsq,
+        "swc":args.swc,
+        "quant_method": args.quant_method,
+        "block_size": args.block_size,
+        "max_rotation_step": args.max_rotation_step,
+        "permutation_times": args.permutation_times,
     }
     args.act_quant_params = {
         "n_bits":  16 if args.only_quant_kv else args.abits,
         "per_channel_axes": [],
         "symmetric": False,
         "dynamic_method": args.a_dynamic_method,
-        "metric": args.metric
+        "metric": args.metric,
+        "lac":args.lac,
+        "act_group_size": args.act_group_size,
+        "quant_method": args.quant_method,
+        "block_size": args.block_size,
+        "max_rotation_step": args.max_rotation_step,
+        "permutation_times": args.permutation_times,
     }
     args.q_quant_params = {
         "n_bits": 16 if args.only_quant_kv else args.abits,
         "per_channel_axes": [],
         "symmetric": False,
         "dynamic_method": args.a_dynamic_method,
-        "metric": args.metric
+        "metric": args.metric,
+        "quant_method": args.quant_method,
+        "block_size": args.block_size,
+        "max_rotation_step": args.max_rotation_step,
     }
     args.k_quant_params = {
         "n_bits": args.abits,
         "per_channel_axes": [],
         "symmetric": False,
         "dynamic_method": args.a_dynamic_method,
-        "metric": args.metric
+        "metric": args.metric,
+        "quant_method": args.quant_method,
+        "block_size": args.block_size,
     }
     args.v_quant_params = {
         "n_bits": args.abits,
@@ -396,6 +420,26 @@ def main():
                     not args.disable_w_quant, not args.disable_a_quant
                 )
         logger.info(time.time() - tick)
+        if args.save_dir:
+        # delete fsbr parameters
+            for name, module in lm.model.named_modules():
+                if isinstance(module, QuantLinear):
+                    del module.weight_quantizer.lowbound_factor
+                    del module.weight_quantizer.upbound_factor
+                if isinstance(module,ILLMlamaDecoderLayer) or isinstance(module,ILLMOptDecoderLayer):
+                    if args.let:
+                        del module.qkv_smooth_scale
+                        del module.qkv_smooth_shift
+                        del module.out_smooth_scale
+                        del module.out_smooth_shift
+                        del module.fc1_smooth_scale
+                        del module.fc1_smooth_shift           
+            lm.model.save_pretrained(args.save_dir+"/rptq")  
+            lm.tokenizer.save_pretrained(args.save_dir+"/rptq") 
+        
+        logger.info("=== start evaluation ===")
+        evaluate_illm(lm, args, logger)
+
     
     elif args.method == "slim++" and args.wbits < 16 or args.abits < 16:
         from quantize.omniquant import omniquant
@@ -413,7 +457,7 @@ def main():
             dataloader,
             act_scales,
             act_shifts,
-            block_precision,
+            args.block_precision,
             logger
         ) 
         logger.info(time.time() - tick)
@@ -433,16 +477,16 @@ def main():
                         del module.out_smooth_shift
                         del module.fc1_smooth_scale
                         del module.fc1_smooth_shift           
-            lm.model.save_pretrained(args.save_dir+"/omniquant")  
-            lm.tokenizer.save_pretrained(args.save_dir+"/omniquant") 
+            lm.model.save_pretrained(args.save_dir+"/slimpp")  
+            lm.tokenizer.save_pretrained(args.save_dir+"/slimpp") 
         logger.info("=== start evaluation ===")
         evaluate(lm, args, logger)
 
     elif args.method == "illm" and args.wbits >= 16 or args.abits >= 16:
         tick = time.time()
-        from quantize.illm import illm  
-        from models.int_llama_layer import IllmLlamaDecoderLayer
-        from models.int_opt_layer import IllmOPTDecoderLayer
+        from .quantize.illm_FSBR import FSBR 
+        from models.int_llama_layer import ILLMlamaDecoderLayer
+        from models.int_opt_layer import ILLMOptDecoderLayer
         from eval_ppl_utils import evaluate_illm
 
         FSBR( 
@@ -460,7 +504,7 @@ def main():
                 if isinstance(module, QuantLinear):
                     del module.weight_quantizer.lowbound_factor
                     del module.weight_quantizer.upbound_factor
-                if isinstance(module,QuantLlamaDecoderLayer) or isinstance(module,QuantOPTDecoderLayer):
+                if isinstance(module,ILLMlamaDecoderLayer) or isinstance(module,ILLMOptDecoderLayer):
                     if args.let:
                         del module.qkv_smooth_scale
                         del module.qkv_smooth_shift
@@ -468,12 +512,33 @@ def main():
                         del module.out_smooth_shift
                         del module.fc1_smooth_scale
                         del module.fc1_smooth_shift           
-            lm.model.save_pretrained(args.save_dir)  
-            lm.tokenizer.save_pretrained(args.save_dir) 
+            lm.model.save_pretrained(args.save_dir+"/illm")  
+            lm.tokenizer.save_pretrained(args.save_dir+"/illm") 
         
         logger.info("=== start evaluation ===")
         evaluate_illm(lm, args, logger)
 
+    elif args.method == "duquant" and args.wbits < 16 or args.abits < 16:
+        from quantize.duquant import duquant
+        from eval_ppl_utils import evaluate 
+
+        tick = time.time()
+        duquant(
+            lm,
+            args,
+            dataloader,
+            act_scales,
+            act_shifts,
+            logger
+        )
+        logger.info(time.time() - tick)
+
+        if args.save_dir:
+            lm.model.save_pretrained(args.save_dir+"/duquant")  
+            lm.tokenizer.save_pretrained(args.save_dir+"/duquant") 
+        
+        logger.info("=== start evaluation ===")
+        evaluate(lm, args, logger)
         
 if __name__ == "__main__":
     print(sys.argv)

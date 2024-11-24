@@ -185,3 +185,4 @@ temp.sh
 save_pth/
 quant_omniquant.egg-info/
 *.pth
+data/

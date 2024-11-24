@@ -5,7 +5,6 @@ import copy
 import math
 import utils
 import os
-import pdb
 import gc
 from quantize.omni_utils import let_parameters, lwc_parameters, get_omni_parameters,\
                             omni_state_dict, register_scales_and_zeros,smooth_and_quant_temporary,\
@@ -279,7 +278,6 @@ def omniquant(
                             loss += loss_func(fp_inps_2[index:index+args.batch_size,], quant_out)
                     if not math.isfinite(loss.item()):
                         logger.info("Loss is NAN, stopping training")
-                        pdb.set_trace()
                         
                     loss_list.append(loss.detach().cpu())
                     optimizer.zero_grad()

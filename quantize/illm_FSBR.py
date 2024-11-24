@@ -13,7 +13,7 @@ import utils
 import os
 import pdb
 import gc
-from quantize.utils import let_parameters, lwc_parameters, get_fsbr_parameters,rescale_paramters,\
+from quantize.illm_utils import let_parameters, lwc_parameters, get_fsbr_parameters,rescale_paramters,\
                             fsbr_state_dict, register_scales_and_zeros,smooth_and_quant_temporary,\
                             smooth_and_quant_inplace,clear_temp_variable,set_quant_state
 from einops import *

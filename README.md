@@ -6,8 +6,9 @@ Include:
 | AffineQuant | ✅ | ✅ | TODO | ✅ 
 | LRQuant | ✅ | ✅ | TODO | ✅ 
 | RPTQ | TODO | TODO | TODO | TODO 
-| Slim-Plus | TODO | TODO | TODO | TODO 
-| I-LLM | TODO | TODO | TODO | TODO 
+| Slim-Plus | ✅ | ✅ | TODO | TODO 
+| I-LLM | ✅ | ✅ | TODO | TODO 
+| DuQuant | ✅ | ✅ | TODO | TODO 
 
 ## Install
 ```
@@ -30,7 +31,7 @@ pip install -v .
 1. Obtain the channel-wise scales and shifts required for initialization:
 you can generate channel-wise scales and shifts by yourself:
 ```
-python generate_act_scale_shift.py --model /PATH/TO/LLaMA3/
+python generate_act_scale_shift.py --model /PATH/TO/LLaMA2/
 ```
 
 ### For OmniQuant
@@ -39,15 +40,15 @@ python generate_act_scale_shift.py --model /PATH/TO/LLaMA3/
 # W3A16
 python main.py \
 --method omniquant \
---model /PATH/TO/LLaMA3/  \
---epochs 20 --log_dir ./log/llama3-8b-w3a16 \
+--model /PATH/TO/LLaMA2/  \
+--epochs 20 \
 --eval_ppl --wbits 3 --abits 16 --lwc
 
 # W3A16g128
 python main.py \
 --method omniquant \
---model /PATH/TO/LLaMA3/  \
---epochs 20 --log_dir ./log/llama3-8b-w3a16g128 \
+--model /PATH/TO/LLaMA2/  \
+--epochs 20 \
 --eval_ppl --wbits 3 --abits 16 --group_size 128 --lwc
 ```
 
@@ -56,8 +57,8 @@ python main.py \
 # W4A4
 python main.py \
 --method omniquant \
---model /PATH/TO/LLaMA3/  \
---epochs 20 --log_dir ./log/llama3-8b-w4a4 \
+--model /PATH/TO/LLaMA2/  \
+--epochs 20 \
 --eval_ppl --wbits 4 --abits 4 --lwc --let \
 --tasks piqa,arc_easy,arc_challenge,boolq,hellaswag,winogrande
 ```
@@ -67,8 +68,8 @@ take LLaMa-7B with W3A16g128 quantization as an example:
 ```
 python main.py \
 --method omniquant \
---model /PATH/TO/LLaMA3/  \
---epochs 0 --log_dir ./log/test \
+--model /PATH/TO/LLaMA2/  \
+--epochs 0 \
 --eval_ppl --wbits 3 --abits 16 --group_size 128 --lwc \
 --resume /PATH/TO/Pretrained/Parameters 
 ```
@@ -79,15 +80,15 @@ python main.py \
 # W3A16
 python main.py \
 --method affinequant \
---model /PATH/TO/LLaMA3 \
---epochs 20 --log_dir ./log/llama3-8b-w3a16 \
+--model /PATH/TO/LLaMA2 \
+--epochs 20 \
 --eval_ppl --wbits 3 --abits 16 --lwc --use_ln_matrix --sf 1e-2
 
 # W3A16g128
 python main.py \
 --method affinequant \
---model /PATH/TO/LLaMA3/llama3-8b  \
---epochs 20 --log_dir ./log/llama3-8b-w3a16g128 \
+--model /PATH/TO/LLaMA2/llama2-8b  \
+--epochs 20 \
 --eval_ppl --wbits 3 --abits 16 --group_size 128 --lwc --use_ln_matrix --sf 1e-2
 ```
 
@@ -96,8 +97,8 @@ python main.py \
 # W4A4
 python main.py \
 --method affinequant \
---model /PATH/TO/LLaMA3/llama3-8b  \
---epochs 20 --log_dir ./log/llama3-8b-w4a4 \
+--model /PATH/TO/LLaMA2/llama2-8b  \
+--epochs 20 \
 --eval_ppl --wbits 4 --abits 4 --lwc --let --aug_loss --use_matrix --sf 0.1 \
 --tasks hendrycksTest,piqa,arc_easy,arc_challenge,boolq,hellaswag,winogrande
 ```
@@ -107,7 +108,7 @@ take LLaMa-7B with W3A16g128 quantization as an example:
 ```
 python main.py \
 --method affinequant \
---model /PATH/TO/LLaMA3/  \
+--model /PATH/TO/LLaMA2/  \
 --epochs 0 --log_dir ./log/test \
 --eval_ppl --wbits 3 --abits 16 --group_size 128 --lwc --let --use_ln_matrix --sf 1e-2 \
 --resume /PATH/TO/Pretrained/Parameters 
@@ -118,8 +119,8 @@ python main.py \
 # W4A4 ppl
 python main.py \
 --method lrquant \
---model /PATH/TO/LLaMA3/  \
---epochs 20 --log_dir ./log/llama3-8b-w4a4 \
+--model /PATH/TO/LLaMA2/  \
+--epochs 20 \
 --eval_ppl --wbits 4 --abits 4 --lwc --let \
 ```
 
@@ -127,8 +128,8 @@ python main.py \
 # W4A4 zero-shot
 python main.py \
 --method lrquant \
---model /PATH/TO/LLaMA3/  \
---epochs 20 --log_dir ./log/llama3-8b-w4a4 \
+--model /PATH/TO/LLaMA2/  \
+--epochs 20 \
 --wbits 4 --abits 4 --lwc --let \
 --tasks piqa,arc_easy,arc_challenge,boolq,hellaswag,winogrande
 ```
@@ -137,8 +138,8 @@ python main.py \
 # W4A4 tta
 python main.py \
 --method lrquant \
---model /PATH/TO/LLaMA3/  \
---epochs 20 --log_dir ./log/llama3-8b-w4a4 \
+--model /PATH/TO/LLaMA2/  \
+--epochs 20 \
 --eval_ppl --wbits 4 --abits 4 --lwc --let --tta\
 ```
 
@@ -146,8 +147,7 @@ python main.py \
 ```
 python main.py \
 --method rptq \
---model /PATH/TO/LLaMA3/  \
---log_dir ./log/llama3-8b-w4a4 \
+--model /PATH/TO/LLaMA2/  \
 --eval_ppl --wbits 4 --abits 4 \
 --tasks lambada_openai,piqa,arc_easy,arc_challenge,openbookqa,boolq
 ```
@@ -156,8 +156,8 @@ Only quantize KV cache
 ```
 python main.py \
 --method rptq \
---model /PATH/TO/LLaMA3/  \
---log_dir ./log/llama3-8b-kv \
+--model /PATH/TO/LLaMA2/  \
+--log_dir ./log/llama2-8b-kv \
 --wbits 4 --abits 4 --only_quant_kv \
 --eval_ppl --tasks lambada_openai,piqa,arc_easy,arc_challenge,openbookqa,boolq
 ```
@@ -168,17 +168,17 @@ python main.py \
 # W2A16G128
 python main.py \
 --method slim++ \
---model /PATH/TO/LLaMA3/ \
+--model /PATH/TO/LLaMA2/ \
 --eval_ppl \
---epochs 50 --log_dir ./log/llama3-8b-w2a16g128 \
+--epochs 50 \
 --wbits 2 --abits 16 --group_size 128 --lwc \
 --tasks piqa,arc_easy,arc_challenge,boolq,hellaswag,winogrande
 
 python main.py \
 --method slim++ \
---model /PATH/TO/LLaMA3/ \
+--model /PATH/TO/LLaMA2/ \
 --eval_ppl \
---epochs 50 --log_dir ./log/llama3-8b-w2a16g128 \
+--epochs 50 \
 --wbits 2 --abits 16 --group_size 128 --lwc --aug_loss
 ```
 
@@ -186,17 +186,17 @@ python main.py \
 # W3A16G128
 python main.py \
 --method slim++ \
---model /PATH/TO/LLaMA3/ \
+--model /PATH/TO/LLaMA2/ \
 --eval_ppl \
---epochs 50 --log_dir ./log/llama3-8b-w3a16g128 \
+--epochs 50  \
 --wbits 3 --abits 16 --group_size 128 --lwc \
 --tasks piqa,arc_easy,arc_challenge,boolq,hellaswag,winogrande
 
 python main.py \
 --method slim++ \
---model /PATH/TO/LLaMA3/ \
+--model /PATH/TO/LLaMA2/ \
 --eval_ppl \
---epochs 50 --log_dir ./log/llama3-8b-w3a16g128 \
+--epochs 50 \
 --wbits 3 --abits 16 --group_size 128 --lwc --aug_loss
 ```
 
@@ -205,9 +205,9 @@ python main.py \
 ```
 python main.py \
 --method illm \
---model /PATH/TO/LLaMA3/ \
+--model /PATH/TO/LLaMA2/ \
 --eval_ppl \
---epochs 20 --output_dir ./log/Llama2-7b_w4a8 \
+--epochs 20 \
 --wbits 4 --abits 4 --lwc --let \
 --fully_quant
 ```
@@ -215,11 +215,50 @@ python main.py \
 ```
 python main.py \
 --method illm \
---model /PATH/TO/LLaMA3/ \
+--model /PATH/TO/LLaMA2/ \
 --eval_ppl \
---epochs 0 --output_dir ./log/Llama2-7b_w4a8/fsbr_parameters.pt \
+--epochs 0 \
 --wbits 4 --abits 4 --lwc --let \
 --fully_quant --illm
+```
+
+
+### For DuQuant
+``` 1. python get_rot.py ```
+2. DuQuant
+``` 
+python main.py \
+--method duquant \
+--model /PATH/TO/LLaMA2/ \
+--block_size 128 \
+--max_rotation_step 256 \
+--epochs 0 \
+--wbits 4 \
+--abits 4 \
+--lwc \
+--alpha 0.6 \
+--smooth \
+--lac 0.9 \
+--swc 0.8 \
+--eval_ppl \
+--task arc_easy,arc_challenge,hellaswag,winogrande,boolq,piqa\
+```
+2. DuQuant + lwc
+```
+python main.py \
+--method duquant \
+--model /PATH/TO/LLaMA2/ \
+--block_size 128 \
+--max_rotation_step 256 \
+--epochs 20 \
+--wbits 4 \
+--abits 4 \
+--lwc \
+--alpha 0.5 \
+--smooth \
+--lac 0.9 \
+--eval_ppl \
+--task arc_easy,arc_challenge,hellaswag,winogrande,boolq,piqa
 ```
 
 

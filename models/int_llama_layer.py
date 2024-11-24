@@ -10,8 +10,8 @@ from transformers.activations import ACT2FN
 import pdb
 import copy
 
-from quantize.int_linear import QuantLinear
-from quantize.int_matmul import QuantMatMul
+from quantize.int_linear import QuantLinear, DuQuantLinear
+from quantize.int_matmul import QuantMatMul, DuQuantMatMul
 
 # I-LLM
 from quantize.illm_quant_modules import QuantAdd,QuantSoftmax,QuantSwiglu,FSBRLlamaRMSNorm
@@ -45,6 +45,9 @@ class QuantLlamaMLP(nn.Module):
         self.act_fn = ACT2FN[hidden_act]
         if self.method == 'illm':
             self.swiglu = QuantSwiglu(args.swiglu_quant_params,args.swiglu_quant_params)
+        elif self.method == 'duquant':
+            self.init_duquant_params = torch.tensor(0) if args.gate_weight_quant_params['quant_method'] == 'duquant' else torch.tensor(1)
+
 
     def forward(self, x):
         if self.method == 'illm':
@@ -53,6 +56,12 @@ class QuantLlamaMLP(nn.Module):
             act_rst = self.swiglu(gate_proj_rst,up_proj_rst)
             down_proj_rst = self.down_proj(act_rst)
             return down_proj_rst
+        elif not self.init_duquant_params:
+            self.init_duquant_params = torch.tensor(1)
+            act = self.act_fn(self.gate_proj(x))
+            self.up_proj.copy_quantizers_duquant_params(self.gate_proj)
+            mul = act * self.up_proj(x)
+            return self.down_proj(mul)
         else:
             return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
@@ -106,14 +115,17 @@ class QuantLlamaAttention(nn.Module):
             org_module.o_proj, args.weight_quant_params, args.act_quant_params
         )
         self.qkt_matmul = QuantMatMul(
-            args.q_quant_params, args.k_quant_params, matmul_func=torch.matmul
+            args.q_quant_params, args.k_quant_params, matmul_func=torch.matmul, rotate=None
         )
         self.pv_matmul = QuantMatMul(
-            args.p_quant_params, args.v_quant_params, matmul_func=torch.matmul
+            args.p_quant_params, args.v_quant_params, matmul_func=torch.matmul, rotate=None
         )
 
         if self.method == 'illm':
             self.softmax = QuantSoftmax(args.softmax_quant_params,-1)
+        elif self.method == 'duquant':
+            self.init_duquant_params = torch.tensor(0) if args.gate_weight_quant_params['quant_method'] == 'duquant' else torch.tensor(1)
+
         self.use_weight_quant = False
         self.use_act_quant = False
 
@@ -136,16 +148,19 @@ class QuantLlamaAttention(nn.Module):
         # key_states = self.k_proj(hidden_states)
         # value_states = self.v_proj(hidden_states)
         query_states = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        if not self.init_duquant_params:
+            self.k_proj.copy_quantizers_duquant_params(self.q_proj)
         key_states =self.k_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        if not self.init_duquant_params:
+            self.v_proj.copy_quantizers_duquant_params(self.q_proj)
         value_states = self.v_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
             kv_seq_len += past_key_value[0].shape[-2]
 
-        cos, sin = self.rotary_emb(value_states, position_ids=position_ids)
+        cos, sin = self.rotary_emb(value_states, position_ids=position_ids, seq_len=kv_seq_len)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-
 
         # [bsz, nh, t, hd]
         if past_key_value is not None:
@@ -1012,6 +1027,8 @@ class ILLMlamaDecoderLayer(nn.Module):
                 m.use_act_quant = fully_quant
       
     def smooth_and_quant_temporary(self):
+        from models.illm_transformation import truncate_number, smooth_ln_fcs_temporary, smooth_fc_fc_temporary, smooth_q_k_temporary
+
         if self.let:
             with torch.no_grad():
                 for name, module in self.named_parameters():
@@ -1049,6 +1066,8 @@ class ILLMlamaDecoderLayer(nn.Module):
 
     @torch.no_grad()
     def smooth_and_quant_inplace(self):
+        from models.illm_transformation import truncate_number, smooth_ln_fcs_inplace, smooth_fc_fc_inplace, smooth_q_k_inplace
+
         if self.let:
             for name, module in self.named_parameters():
                 if "smooth_scale" in name:
@@ -1101,3 +1120,220 @@ class ILLMlamaDecoderLayer(nn.Module):
         for name, module in self.named_modules():
             if isinstance(module, QuantLinear):
                 module.weight_quantizer.register_scales_and_zeros()
+
+
+class DuQuantLlamaDecoderLayer(nn.Module):
+    def __init__(self, 
+                 config: LlamaConfig,
+                 ori_layer,
+                 args):
+        super().__init__()
+        from quantize.du_norm import DuLlamaRMSNorm
+
+        self.hidden_size = config.hidden_size
+        self.self_attn = QuantLlamaAttention(
+            org_module=ori_layer.self_attn,
+            config=config,
+            args=args,
+            )
+        self.mlp = QuantLlamaMLP(
+            org_module=ori_layer.mlp,
+            hidden_size=self.hidden_size,
+            intermediate_size=config.intermediate_size,
+            hidden_act=config.hidden_act,
+            args=args,
+        )
+        self.input_layernorm = DuLlamaRMSNorm(ori_layer.input_layernorm,eps=ori_layer.input_layernorm.variance_epsilon)
+        self.post_attention_layernorm = DuLlamaRMSNorm(ori_layer.post_attention_layernorm,eps=ori_layer.post_attention_layernorm.variance_epsilon)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        output_attentions: Optional[bool] = False,
+        use_cache: Optional[bool] = False,
+    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+        """
+        Args:
+            hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
+            attention_mask (`torch.FloatTensor`, *optional*): attention mask of size
+                `(batch, 1, tgt_len, src_len)` where padding elements are indicated by very large negative values.
+            output_attentions (`bool`, *optional*):
+                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
+                returned tensors for more detail.
+            use_cache (`bool`, *optional*):
+                If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding
+                (see `past_key_values`).
+            past_key_value (`Tuple(torch.FloatTensor)`, *optional*): cached past key and value projection states
+        """
+        residual = hidden_states
+        
+        hidden_states = self.input_layernorm(hidden_states)
+        
+        # Self Attention
+        hidden_states, self_attn_weights, present_key_value = self.self_attn(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_value=past_key_value,
+            output_attentions=output_attentions,
+            use_cache=use_cache,
+        )
+        hidden_states = residual + hidden_states
+
+        # Fully Connected
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states).half()
+        
+        hidden_states = self.mlp(hidden_states.to(self.mlp.up_proj.weight.device)).to(residual.device)
+        hidden_states = residual + hidden_states
+
+        outputs = (hidden_states,)
+
+        if output_attentions:
+            outputs += (self_attn_weights,)
+
+        if use_cache:
+            outputs += (present_key_value,)
+
+        return outputs        
+
+    def set_quant_state(self, weight_quant: bool = False, act_quant: bool = False):
+        # setting weight quantization here does not affect actual forward pass
+        self.use_weight_quant = weight_quant
+        self.use_act_quant = act_quant
+        names = []
+        for name, m in self.named_modules():
+            if isinstance(m, (DuQuantLinear, DuQuantMatMul)):
+                names.append(name)
+                m.set_quant_state(weight_quant, act_quant)
+      
+    def smooth_and_quant_temporary(self):
+        from models.duquant_transformation import truncate_number, smooth_ln_fcs_temporary, smooth_fc_fc_temporary, smooth_q_k_temporary
+
+        if self.let:
+            with torch.no_grad():
+                for name, module in self.named_parameters():
+                    if "smooth_scale" in name:
+                        module.data = truncate_number(module)
+            smooth_ln_fcs_temporary(self.input_layernorm,[self.self_attn.q_proj, self.self_attn.k_proj, self.self_attn.v_proj],
+                                    self.qkv_smooth_scale,self.qkv_smooth_shift)
+            smooth_ln_fcs_temporary(self.post_attention_layernorm,[self.mlp.up_proj,self.mlp.gate_proj],
+                                    self.fc1_smooth_scale,self.fc1_smooth_shift)
+            smooth_fc_fc_temporary(self.self_attn.v_proj,self.self_attn.o_proj,
+                                self.out_smooth_scale, self.out_smooth_shift)
+            smooth_q_k_temporary(self.self_attn.q_proj, self.self_attn.k_proj,
+                                self.qkt_smooth_scale)
+            self.mlp.down_proj.temp_weight = self.mlp.down_proj.weight
+        else:
+            for name, module in self.named_modules():
+                if isinstance(module, DuQuantLinear):
+                    module.temp_weight = module.weight
+        # quant
+        for name, module in self.named_modules():
+            if isinstance(module, DuQuantLinear):
+                if hasattr(module, "temp_weight"):
+                    module.temp_weight = module.weight_quantizer(module.temp_weight)
+                else:
+                    module.temp_weight = module.weight_quantizer(module.weight)
+                if not hasattr(module, "temp_bias"):
+                    module.temp_bias = module.bias
+                module.use_temporary_parameter=True
+
+    def clear_temp_variable(self):
+       for name, module in self.named_modules():
+            if isinstance(module, DuQuantLinear):
+                del module.temp_weight
+                del module.temp_bias
+
+    @torch.no_grad()
+    def smooth_and_quant_inplace(self):
+        from models.duquant_transformation import truncate_number, smooth_ln_fcs_inplace, smooth_fc_fc_inplace, smooth_q_k_inplace
+
+        if self.let:
+            for name, module in self.named_parameters():
+                if "smooth_scale" in name:
+                    module.data = truncate_number(module)
+            smooth_ln_fcs_inplace(self.input_layernorm,[self.self_attn.q_proj, self.self_attn.k_proj, self.self_attn.v_proj],
+                                    self.qkv_smooth_scale,self.qkv_smooth_shift)
+            smooth_ln_fcs_inplace(self.post_attention_layernorm,[self.mlp.up_proj,self.mlp.gate_proj],
+                                    self.fc1_smooth_scale,self.fc1_smooth_shift)
+            smooth_fc_fc_inplace(self.self_attn.v_proj,self.self_attn.o_proj,
+                                self.out_smooth_scale, self.out_smooth_shift)
+            smooth_q_k_inplace(self.self_attn.q_proj, self.self_attn.k_proj,
+                                self.qkt_smooth_scale)
+        for name, module in self.named_modules():
+            if isinstance(module, DuQuantLinear):
+                module.weight = module.weight_quantizer(module.weight)
+                module.use_temporary_parameter=False
+
+    def let_parameters(self, use_shift=True):
+        params = []
+        template = "smooth" if use_shift else "smooth_scale"
+        for n, m in self.named_parameters():
+            if n.find(template) > -1:
+                params.append(m)
+        return iter(params)  
+
+    def lwc_parameters(self):
+        params = []
+        for n, m in self.named_parameters():
+            if n.find('bound_factor') > -1:
+                params.append(m)
+        return iter(params)  
+
+    def duquant_parameters(self, use_shift=True):
+        params = []
+        template = "smooth" if use_shift else "smooth_scale"
+        for n, m in self.named_parameters():
+            if n.find('bound_factor') > -1 or n.find(template) > -1:
+                params.append(m)
+        return iter(params)  
+    
+    def duquant_state_dict(self, destination=None, prefix='', keep_vars=False):
+        if destination is None:
+            destination = OrderedDict()
+        for name, param in self.named_parameters():
+            if name.find('smooth') > -1 or name.find('bound_factor') > -1:
+                destination[prefix + name] = param if keep_vars else param.detach()
+        return destination
+    
+    def register_scales_and_zeros(self):
+        for name, module in self.named_modules():
+            if isinstance(module, DuQuantLinear):
+                module.weight_quantizer.register_scales_and_zeros()
+    
+    def register_duquant_params(self):        
+        for name, module in self.named_modules():
+            if isinstance(module, QuantLlamaMLP) or isinstance(module, QuantLlamaAttention):
+                delattr(module, 'init_duquant_params')
+                module.register_buffer('init_duquant_params', torch.tensor(1))
+            if isinstance(module, DuQuantLinear):
+                module.weight_quantizer.register_duquant_params()
+                module.act_quantizer.register_duquant_params()
+    
+    def load_duquant_params(self, state_dict, device):
+        for k, v in state_dict.items():
+            if k.find('R') > -1 or k.find('permutation_list') > -1 or k.find('init_duquant_params') > -1:
+                exec(f'self.{k} = v.to(device)')
+    
+    def load_smooth_params(self, state_dict, device):
+        for k, v in state_dict.items():
+            if k.find('smooth') > -1:
+                # exec(f'self.{k} = v')
+                self.register_parameter(k, torch.nn.Parameter(v.to(device), requires_grad=False))
+    
+    def load_post_params(self, state_dict, device):
+        for k, v in state_dict.items():
+            if k.find('post') > -1:
+                # exec(f'self.{k} = v')
+                rg = False if k.find('down') > -1 else True
+                self.register_parameter(k, torch.nn.Parameter(v.to(device), requires_grad=rg))
+
+    def load_lwc_params(self, state_dict, device):
+        for k, v in state_dict.items():
+            if k.find('bound_factor') > -1:
+                v = torch.nn.Parameter(v.to(device))
+                exec(f'self.{k} = v.to(device)')

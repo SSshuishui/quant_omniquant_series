@@ -9,6 +9,10 @@ from quantize.int_linear import QuantLinear
 from quantize.int_matmul import QuantMatMul
 from models.models_utils import truncate_number
 
+# I-LLM
+from quantize.illm_quant_modules import QuantAdd,QuantSoftmax,QuantSwiglu,FSBRLayerNorm
+
+
 
 class QuantOPTAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
@@ -923,6 +927,7 @@ class RPTQQuantOPTDecoderLayer(nn.Module):
     ):
         super().__init__()
         from quantize.reorder_layer_norm import ReorderLayerNorm
+
         self.embed_dim = config.hidden_size
         self.self_attn = QuantOPTAttention(
             org_module=ori_layer.self_attn,
@@ -1036,6 +1041,8 @@ class RPTQQuantOPTDecoderLayer(nn.Module):
         return outputs
 
     def set_quant_state(self, weight_quant: bool = False, act_quant: bool = False):
+        from quantize.reorder_layer_norm import ReorderLayerNorm
+        
         # setting weight quantization here does not affect actual forward pass
         self.use_weight_quant = weight_quant
         self.use_act_quant = act_quant
@@ -1047,3 +1054,148 @@ class RPTQQuantOPTDecoderLayer(nn.Module):
             if isinstance(m, ReorderLayerNorm):
                 names.append(name)
                 m.set_quant_state(weight_quant, act_quant)
+
+class ILLMOPTDecoderLayer(nn.Module):
+    def __init__(
+        self,
+        config,
+        ori_layer,
+        args,
+    ):
+        super().__init__()
+
+        self.embed_dim = config.hidden_size
+        self.self_attn = QuantOPTAttention(
+            org_module=ori_layer.self_attn,
+            embed_dim=self.embed_dim,
+            num_heads=config.num_attention_heads,
+            dropout=config.attention_dropout,
+            is_decoder=True,
+            bias=config.enable_bias,
+            args=args,
+        )
+        self.do_layer_norm_before = config.do_layer_norm_before
+        self.dropout = config.dropout
+        self.self_attn_layer_norm = FSBRLayerNorm(
+            ori_layer.self_attn_layer_norm,
+            act_quant_params = args.norm_quant_params
+        )
+        self.fc1 = QuantLinear(
+            ori_layer.fc1,
+            weight_quant_params=args.weight_quant_params,
+            act_quant_params=args.act_quant_params,
+        )
+        self.fc2 = QuantLinear(
+            ori_layer.fc2,
+            weight_quant_params=args.weight_quant_params,
+            act_quant_params=args.act_quant_params,
+        )
+        self.final_layer_norm = FSBRLayerNorm(
+            ori_layer.final_layer_norm,
+            act_quant_params=args.norm_quant_params
+        )
+        self.type = ori_layer.fc1.weight.dtype
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        layer_head_mask: Optional[torch.Tensor] = None,
+        output_attentions: Optional[bool] = False,
+        use_cache: Optional[bool] = False,
+        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        **kwargs
+    ):
+        """
+        Args:
+            hidden_states (`torch.Int8Tensor`): the output of previous layer's layernorm in INT8
+            attention_mask (`torch.FloatTensor`, *optional*): attention mask of size
+                `(batch, 1, tgt_len, src_len)` where padding elements are indicated by very large negative values.
+            layer_head_mask (`torch.FloatTensor`, *optional*): mask for attention heads in a given layer of size
+                `(encoder_attention_heads,)`.
+            output_attentions (`bool`, *optional*):
+                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
+                returned tensors for more detail.
+            use_cache (`bool`, *optional*):
+                If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding
+                (see `past_key_values`).
+            past_key_value (`Tuple(torch.FloatTensor)`, *optional*): cached past key and value projection states
+        """
+
+        # Self Attention
+
+        residual = hidden_states
+        if self.do_layer_norm_before:
+            hidden_states = self.self_attn_layer_norm(hidden_states)
+        # hidden_states = self.self_attn_layer_norm(hidden_states.float()).to(self.type)
+
+        hidden_states, self_attn_weights, present_key_value = self.self_attn(
+            hidden_states=hidden_states,
+            past_key_value=past_key_value,
+            attention_mask=attention_mask,
+            layer_head_mask=layer_head_mask,
+            output_attentions=output_attentions,
+        )
+
+        hidden_states = nn.functional.dropout(hidden_states, p=0.0, training=False)
+
+        hidden_states = residual + hidden_states
+
+        if not self.do_layer_norm_before:
+            hidden_states = self.self_attn_layer_norm(hidden_states)
+
+        # Fully Connected
+        hidden_states_shape = hidden_states.shape
+        hidden_states = hidden_states.reshape(-1, hidden_states.size(-1))
+        residual = hidden_states
+
+        # residual.add_(hidden_states.to(residual.dtype))
+        if self.do_layer_norm_before:
+            hidden_states = self.final_layer_norm(hidden_states)
+        # hidden_states = self.final_layer_norm(hidden_states.float()).to(self.type)
+
+        
+        hidden_states = self.fc1(hidden_states)
+        hidden_states = F.relu(hidden_states)
+
+        hidden_states = self.fc2(hidden_states)
+        # hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
+
+        hidden_states = (residual + hidden_states).view(hidden_states_shape)
+        # residual.add_(hidden_states.to(residual.dtype))
+        if not self.do_layer_norm_before:
+            hidden_states = self.final_layer_norm(hidden_states)
+
+        outputs = (hidden_states,)
+
+        if output_attentions:
+            outputs += (self_attn_weights,)
+
+        if use_cache:
+            outputs += (present_key_value,)
+
+        return outputs
+
+    def set_quant_state(self, weight_quant: bool = False, act_quant: bool = False, fully_quant=False):
+        # setting weight quantization here does not affect actual forward pass
+        self.use_weight_quant = weight_quant
+        self.use_act_quant = act_quant
+        names = []
+        for name, m in self.named_modules():
+            if isinstance(m, (QuantLinear, QuantMatMul)):
+                names.append(name)
+                m.set_quant_state(weight_quant, act_quant)
+            if isinstance(m,(FSBRLayerNorm, QuantAdd, QuantSoftmax, QuantAdd, QuantSwiglu)):
+                m.use_act_quant = fully_quant
+
+    def clear_temp_variable(self):
+        for name, module in self.named_modules():
+            if isinstance(module, QuantLinear):
+                del module.temp_weight
+                del module.temp_bias
+
+    def register_scales_and_zeros(self):
+        for name, module in self.named_modules():
+            if isinstance(module, QuantLinear):
+                module.weight_quantizer.register_scales_and_zeros()
+    
