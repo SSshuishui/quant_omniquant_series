@@ -1,12 +1,14 @@
 from collections import OrderedDict
-from quantize.int_linear import QuantLinear
+from quantize.int_linear import DuQuantLinear
 import torch
 import torch.nn as nn
-from quantize.int_matmul import QuantMatMul
-from quantize.quantizer import UniformAffineQuantizer
-from models.transformation import *
+from quantize.int_matmul import DuQuantMatMul
+from quantize.du_quantizer import UniformAffineQuantizer
+from models.duquant_transformation import *
 import pickle
-from quantize.const import CLIPMIN
+
+CLIPMIN = 1e-5 # 1e-5
+
 
 def smooth_parameters(model, use_shift=True):
     params = []
@@ -65,7 +67,7 @@ def duquant_state_dict(model, destination=None, prefix='', keep_vars=False):
 
 def register_scales_and_zeros(model):
     for name, module in model.named_modules():
-        if isinstance(module, QuantLinear):
+        if isinstance(module, DuQuantLinear):
             module.weight_quantizer.register_scales_and_zeros()
 
 class TruncateFunction(torch.autograd.Function):
@@ -105,7 +107,7 @@ def post_quant_inplace(model, args):
         for name, module in model.named_parameters():
             if "post_scale" in name:
                 module.data = truncate_number(module)
-            if isinstance(module, QuantLinear):
+            if isinstance(module, DuQuantLinear):
                 if module.act_quantizer.let_s is not None:
                     module.act_quantizer.let_s.requires_grad = False
                 if module.weight_quantizer.let_s is not None:
@@ -113,7 +115,7 @@ def post_quant_inplace(model, args):
             
 def clear_temp_variable(model):
     for name, module in model.named_modules():
-        if isinstance(module, QuantLinear):
+        if isinstance(module, DuQuantLinear):
             if hasattr(module, "temp_weight"):
                 del module.temp_weight
             if hasattr(module, "temp_bias"):
@@ -121,7 +123,7 @@ def clear_temp_variable(model):
 
 def set_registered_x_none(model):
     for name, module in model.named_modules():
-        if isinstance(module, QuantLinear):
+        if isinstance(module, DuQuantLinear):
             module.weight_quantizer.registered_x = None
             module.act_quantizer.registered_x = None
 
@@ -164,11 +166,11 @@ def smooth_and_quant_temporary(model, args, isllama):
             model.fc2.temp_weight = model.fc2.weight
     else:
         for name, module in model.named_modules():
-            if isinstance(module, QuantLinear):
+            if isinstance(module, DuQuantLinear):
                 module.temp_weight = module.weight
     # quant
     for name, module in model.named_modules():
-        if isinstance(module, QuantLinear):
+        if isinstance(module, DuQuantLinear):
             if hasattr(module, "temp_weight"):
                 module.temp_weight = module.weight_quantizer(module.temp_weight)
             else:
@@ -199,19 +201,19 @@ def smooth_and_let_inplace(model, args):
             print('Detected GQA in o_proj')
     
     for name, module in model.named_modules():
-        if isinstance(module, QuantLinear):
+        if isinstance(module, DuQuantLinear):
             module.use_temporary_parameter=False
         
 @torch.no_grad()
 def quant_inplace(model):
     for name, module in model.named_modules():
-        if isinstance(module, QuantLinear):
+        if isinstance(module, DuQuantLinear):
             module.weight = module.weight_quantizer(module.weight, return_no_quant=False)
 
 @torch.no_grad()
 def quant_soft_inplace(model):
     for name, module in model.named_modules():
-        if isinstance(module, QuantLinear):
+        if isinstance(module, DuQuantLinear):
             module.weight = module.weight_quantizer(module.weight, return_no_quant=True)
 
 def set_quant_state(self, weight_quant: bool = False, act_quant: bool = False):
@@ -219,5 +221,5 @@ def set_quant_state(self, weight_quant: bool = False, act_quant: bool = False):
     self.use_weight_quant = weight_quant
     self.use_act_quant = act_quant
     for m in self.modules():
-        if isinstance(m, (QuantLinear, QuantMatMul)):
+        if isinstance(m, (DuQuantLinear, DuQuantMatMul)):
             m.set_quant_state(weight_quant, act_quant)

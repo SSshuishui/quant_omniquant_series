@@ -30,24 +30,34 @@ class QuantLlamaMLP(nn.Module):
         super().__init__()
         self.method = args.method
 
-        self.gate_proj = QuantLinear(org_module.gate_proj,
-                                           args.weight_quant_params,
-                                           args.act_quant_params,
-                                           None if block_precision is None else block_precision['mlp.gate_proj'])
-        self.down_proj = QuantLinear(org_module.down_proj,
-                                           args.weight_quant_params,
-                                           args.act_quant_params,
-                                           None if block_precision is None else block_precision['mlp.down_proj'])
-        self.up_proj = QuantLinear(org_module.up_proj,
-                                           args.weight_quant_params,
-                                           args.act_quant_params,
-                                           None if block_precision is None else block_precision['mlp.up_proj'])
+        if self.method == 'duquant':
+            self.gate_proj = DuQuantLinear(org_module.gate_proj,
+                                            args.weight_quant_params,
+                                            args.act_quant_params)
+            self.down_proj = DuQuantLinear(org_module.down_proj,
+                                            args.weight_quant_params,
+                                            args.act_quant_params)
+            self.up_proj = DuQuantLinear(org_module.up_proj,
+                                            args.weight_quant_params,
+                                            args.act_quant_params)
+            self.init_duquant_params = torch.tensor(0) if args.weight_quant_params['quant_method'] == 'duquant' else torch.tensor(1)
+        else:
+            self.gate_proj = QuantLinear(org_module.gate_proj,
+                                            args.weight_quant_params,
+                                            args.act_quant_params,
+                                            None if block_precision is None else block_precision['mlp.gate_proj'])
+            self.down_proj = QuantLinear(org_module.down_proj,
+                                            args.weight_quant_params,
+                                            args.act_quant_params,
+                                            None if block_precision is None else block_precision['mlp.down_proj'])
+            self.up_proj = QuantLinear(org_module.up_proj,
+                                            args.weight_quant_params,
+                                            args.act_quant_params,
+                                            None if block_precision is None else block_precision['mlp.up_proj'])
+        
         self.act_fn = ACT2FN[hidden_act]
         if self.method == 'illm':
             self.swiglu = QuantSwiglu(args.swiglu_quant_params,args.swiglu_quant_params)
-        elif self.method == 'duquant':
-            self.init_duquant_params = torch.tensor(0) if args.gate_weight_quant_params['quant_method'] == 'duquant' else torch.tensor(1)
-
 
     def forward(self, x):
         if self.method == 'illm':
@@ -56,7 +66,7 @@ class QuantLlamaMLP(nn.Module):
             act_rst = self.swiglu(gate_proj_rst,up_proj_rst)
             down_proj_rst = self.down_proj(act_rst)
             return down_proj_rst
-        elif not self.init_duquant_params:
+        elif self.method == 'duquant':
             self.init_duquant_params = torch.tensor(1)
             act = self.act_fn(self.gate_proj(x))
             self.up_proj.copy_quantizers_duquant_params(self.gate_proj)
@@ -92,39 +102,65 @@ class QuantLlamaAttention(nn.Module):
             )
 
         self.rotary_emb = copy.deepcopy(org_module.rotary_emb)
-
-        self.k_proj = QuantLinear(
-            org_module.k_proj,
-            args.weight_quant_params,
-            args.act_quant_params,
-            None if block_precision is None else block_precision['self_attn.k_proj']
-        )
-        self.v_proj = QuantLinear(
-            org_module.v_proj,
-            args.weight_quant_params,
-            args.act_quant_params,
-            None if block_precision is None else block_precision['self_attn.v_proj']
-        )
-        self.q_proj = QuantLinear(
-            org_module.q_proj,
-            args.weight_quant_params,
-            args.act_quant_params,
-            None if block_precision is None else block_precision['self_attn.q_proj']
-        )
-        self.o_proj = QuantLinear(
-            org_module.o_proj, args.weight_quant_params, args.act_quant_params
-        )
-        self.qkt_matmul = QuantMatMul(
-            args.q_quant_params, args.k_quant_params, matmul_func=torch.matmul, rotate=None
-        )
-        self.pv_matmul = QuantMatMul(
-            args.p_quant_params, args.v_quant_params, matmul_func=torch.matmul, rotate=None
-        )
+        if self.method == 'duquant':
+            self.k_proj = DuQuantLinear(
+                org_module.k_proj,
+                args.weight_quant_params,
+                args.act_quant_params,
+            )
+            self.v_proj = DuQuantLinear(
+                org_module.v_proj,
+                args.weight_quant_params,
+                args.act_quant_params,
+            )
+            self.q_proj = DuQuantLinear(
+                org_module.q_proj,
+                args.weight_quant_params,
+                args.act_quant_params,
+            )
+            self.o_proj = DuQuantLinear(
+                org_module.o_proj, 
+                args.weight_quant_params, 
+                args.act_quant_params
+            )
+            self.qkt_matmul = DuQuantMatMul(
+                args.act_quant_params, args.act_quant_params, matmul_func=torch.matmul, rotate=None
+            )
+            self.pv_matmul = DuQuantMatMul(
+                args.p_quant_params, args.v_quant_params, matmul_func=torch.matmul, rotate=None
+            )
+            self.init_duquant_params = torch.tensor(0) if args.weight_quant_params['quant_method'] == 'duquant' else torch.tensor(1)
+        else:
+            self.k_proj = QuantLinear(
+                org_module.k_proj,
+                args.weight_quant_params,
+                args.act_quant_params,
+                None if block_precision is None else block_precision['self_attn.k_proj']
+            )
+            self.v_proj = QuantLinear(
+                org_module.v_proj,
+                args.weight_quant_params,
+                args.act_quant_params,
+                None if block_precision is None else block_precision['self_attn.v_proj']
+            )
+            self.q_proj = QuantLinear(
+                org_module.q_proj,
+                args.weight_quant_params,
+                args.act_quant_params,
+                None if block_precision is None else block_precision['self_attn.q_proj']
+            )
+            self.o_proj = QuantLinear(
+                org_module.o_proj, args.weight_quant_params, args.act_quant_params
+            )
+            self.qkt_matmul = QuantMatMul(
+                args.q_quant_params, args.k_quant_params, matmul_func=torch.matmul
+            )
+            self.pv_matmul = QuantMatMul(
+                args.p_quant_params, args.v_quant_params, matmul_func=torch.matmul
+            )
 
         if self.method == 'illm':
             self.softmax = QuantSoftmax(args.softmax_quant_params,-1)
-        elif self.method == 'duquant':
-            self.init_duquant_params = torch.tensor(0) if args.gate_weight_quant_params['quant_method'] == 'duquant' else torch.tensor(1)
 
         self.use_weight_quant = False
         self.use_act_quant = False
@@ -144,14 +180,11 @@ class QuantLlamaAttention(nn.Module):
 
         bsz, q_len, _ = hidden_states.size()
 
-        # query_states = self.q_proj(hidden_states)
-        # key_states = self.k_proj(hidden_states)
-        # value_states = self.v_proj(hidden_states)
         query_states = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        if not self.init_duquant_params:
+        if self.method == "duquant":
             self.k_proj.copy_quantizers_duquant_params(self.q_proj)
         key_states =self.k_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        if not self.init_duquant_params:
+        if self.method == "duquant":
             self.v_proj.copy_quantizers_duquant_params(self.q_proj)
         value_states = self.v_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
@@ -159,7 +192,7 @@ class QuantLlamaAttention(nn.Module):
         if past_key_value is not None:
             kv_seq_len += past_key_value[0].shape[-2]
 
-        cos, sin = self.rotary_emb(value_states, position_ids=position_ids, seq_len=kv_seq_len)
+        cos, sin = self.rotary_emb(value_states, position_ids=position_ids)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         # [bsz, nh, t, hd]

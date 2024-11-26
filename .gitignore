@@ -186,3 +186,4 @@ save_pth/
 quant_omniquant.egg-info/
 *.pth
 data/
+*.pkl

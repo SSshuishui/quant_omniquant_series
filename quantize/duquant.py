@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
-from models.int_llama_layer import QuantLlamaDecoderLayer
-from quantize.int_linear import QuantLinear
+from models.int_llama_layer import DuQuantLlamaDecoderLayer
+from quantize.int_linear import DuQuantLinear
 from contextlib import nullcontext
 import copy
 import math
@@ -18,7 +18,7 @@ CLIPMAX = 1e4 # 1e4
 
 
 def get_named_linears(module):
-    return {name: m for name, m in module.named_modules() if isinstance(m, QuantLinear)}
+    return {name: m for name, m in module.named_modules() if isinstance(m, DuQuantLinear)}
 
 
 def add_new_module(name, original_module, added_module):
@@ -51,12 +51,12 @@ def duquant(
     use_cache = model.config.use_cache
     model.config.use_cache = False
     is_llama = False
-    if "llama" in args.net.lower() or "vicuna" in args.net.lower():
+    if "llama" in args.net.lower():
         is_llama = True
         layers = model.model.layers
         model.model.embed_tokens = model.model.embed_tokens.to(dev)
         model.model.norm = model.model.norm.to(dev)
-        DecoderLayer = QuantLlamaDecoderLayer
+        DecoderLayer = DuQuantLlamaDecoderLayer
         pairs = {
             "q_proj":"qkv",
             "o_proj":"out",
@@ -65,7 +65,7 @@ def duquant(
         }
         layer_name_prefix = "model.layers"
     else:
-        raise ValueError("Only support for llama/Llama-2/Llama-3/Vicuna/Mistral now")
+        raise ValueError("Only support for llama/Llama-2/Llama-3/ now")
     
     
     layers[0] = layers[0].to(dev)
@@ -74,11 +74,11 @@ def duquant(
         traincast = nullcontext
     else:
         dtype = torch.float16
-        traincast = torch.cuda.amp.autocast
+        traincast = torch.amp.autocast
     inps = torch.zeros(
         (args.nsamples, lm.seqlen, model.config.hidden_size), dtype=dtype, device=dev
     )
-    cache = {"i": 0}
+    cache = {"i": 0, "attention_mask": None, "position_ids": None}
 
     # catch the first layer input
     class Catcher(nn.Module):
@@ -90,21 +90,19 @@ def duquant(
         def forward(self, inp, **kwargs):
             inps[cache["i"]] = inp
             cache["i"] += 1
-            cache["attention_mask"] = kwargs["attention_mask"]
+            # cache["attention_mask"] = kwargs["attention_mask"]
             if self.is_llama:
                 cache["position_ids"] = kwargs["position_ids"]
             raise ValueError
 
     layers[0] = Catcher(layers[0])
     layers[0].is_llama = is_llama
-    input_ids = []
 
     with torch.no_grad():
         for batch in dataloader:
             if cache["i"] >= args.nsamples:
                 break
             try:
-                input_ids.append(batch[0])
                 model(batch[0].to(dev))
             except ValueError:
                 pass
@@ -116,7 +114,7 @@ def duquant(
         model.model.embed_tokens = model.model.embed_tokens.cpu()
         model.model.norm = model.model.norm.cpu()
     else:
-        raise ValueError("Only support for llama/Llama-2/Llama-3/Vicuna/Mistral now")
+        raise ValueError("Only support for llama/Llama-2/Llama-3/ now")
     torch.cuda.empty_cache()
     
     quant_inps = inps
@@ -148,27 +146,32 @@ def duquant(
     else:
         duquant_parameters = {}
 
+    hf_device_map = model.hf_device_map
+    print(hf_device_map)
+
     for i in range(len(layers)):
-        for name in ['q', 'k', 'v', 'gate', 'up', 'down', 'o']:
-            exec(f"args.{name}_weight_quant_params = copy.copy(args.weight_quant_params)")
-            exec(f"args.{name}_act_quant_params = copy.copy(args.act_quant_params)")
-        args.q_quant_params = copy.copy(args.act_quant_params)
-        args.k_quant_params = copy.copy(args.act_quant_params)
 
         logger.info(f"=== Start quantize layer {i} ===")
-        layer = layers[i]
-        qlayer = DecoderLayer(lm.model.config, layer, args)
-        qlayer = qlayer.to(dev)        
-        if torch.cuda.device_count() > 1:
-            qlayer.mlp.to("cuda:1")
+        print(f'================={i}==================')
+        hf_device = f"cuda:{hf_device_map[f'{layer_name_prefix}.{i}']}"
+        layer = layers[i].to(hf_device)
+        fp_inps = fp_inps.to(hf_device)
+        quant_inps = quant_inps.to(hf_device)
+        rotate_inps = rotate_inps.to(hf_device)
+        position_ids = position_ids.to(hf_device)
 
-        if args.quant_method == 'duquant':
+        qlayer = DecoderLayer(lm.model.config, layer, args)
+        qlayer = qlayer.to(hf_device)        
+        # if torch.cuda.device_count() > 1:
+        #     qlayer.mlp.to("cuda:1")
+
+        if args.method == 'duquant':
             set_init_duquant_params_state(qlayer, True)
 
         set_quant_state(qlayer, weight_quant=False, act_quant=False)
         if args.epochs > 0 :
             with torch.no_grad():
-                with torch.cuda.amp.autocast():
+                with torch.amp.autocast("cuda"):
                     for j in range(args.nsamples):
                         fp_inps[j] = qlayer(fp_inps[j].unsqueeze(0), attention_mask=attention_mask,position_ids=position_ids)[0]
                         if args.aug_loss:
@@ -189,18 +192,18 @@ def duquant(
 
         if args.smooth:
             if duquant_parameters.get(i):
-                qlayer.load_smooth_params(duquant_parameters[i], dev)
+                qlayer.load_smooth_params(duquant_parameters[i], hf_device)
             else:
-                qlayer.register_parameter("qkt_smooth_scale",torch.nn.Parameter(torch.ones(layer.self_attn.q_proj.out_features,device=dev, dtype=dtype), requires_grad=False))
+                qlayer.register_parameter("qkt_smooth_scale",torch.nn.Parameter(torch.ones(layer.self_attn.q_proj.out_features,device=hf_device, dtype=dtype), requires_grad=False))
                 for name,module in qlayer.named_modules():
-                    if isinstance(module, QuantLinear):
+                    if isinstance(module, DuQuantLinear):
                         for key in pairs.keys():
                             if key in name:
-                                act = act_scales[f"{layer_name_prefix}.{i}.{name}"].to(device=dev, dtype=dtype).clamp(min=CLIPMIN)
+                                act = act_scales[f"{layer_name_prefix}.{i}.{name}"].to(device=hf_device, dtype=dtype).clamp(min=CLIPMIN)
                                 weight = module.weight.abs().max(dim=0)[0].clamp(min=CLIPMIN)
                                 scale = (act.pow(args.alpha)/weight.to(act.device).pow(1-args.alpha)).clamp(min=CLIPMIN)
                                 if use_shift and not is_llama:
-                                    shift = act_shifts[f"{layer_name_prefix}.{i}.{name}"].to(device=dev, dtype=dtype)
+                                    shift = act_shifts[f"{layer_name_prefix}.{i}.{name}"].to(device=hf_device, dtype=dtype)
                                 else:
                                     shift = torch.zeros_like(scale)
                                 if key not in ['down_proj'] and args.smooth_epochs > 0:
@@ -228,7 +231,7 @@ def duquant(
                 for j in range(args.nsamples//args.batch_size):  
                     index = j * args.batch_size
                     # obtain output of quantization model
-                    with traincast():
+                    with traincast("cuda"):
                         smooth_and_quant_temporary(qlayer, args, is_llama)
                         quant_out = qlayer(quant_inps[index:index+args.batch_size,], attention_mask=attention_mask_batch,position_ids=position_ids)[0]
                         loss = loss_func(fp_inps[index:index+args.batch_size,], quant_out)
@@ -257,14 +260,14 @@ def duquant(
         smooth_and_let_inplace(qlayer, args)
 
         # real smooth and quantization      
-        if args.quant_method == 'duquant':
+        if args.method == 'duquant':
             set_init_duquant_params_state(qlayer, False)
             set_quant_state(qlayer, weight_quant=True, act_quant=True)
             if duquant_parameters.get(i):
-                qlayer.load_duquant_params(duquant_parameters[i], dev)
+                qlayer.load_duquant_params(duquant_parameters[i], hf_device)
             else:
                 with torch.no_grad():
-                    with torch.cuda.amp.autocast():
+                    with traincast("cuda"):
                         set_registered_x_none(qlayer)
                         rotate_inps = qlayer(rotate_inps.unsqueeze(0), attention_mask=attention_mask,position_ids=position_ids)[0][0]
             qlayer.register_duquant_params()
@@ -273,11 +276,11 @@ def duquant(
         if args.let:
             set_quant_state(qlayer, weight_quant=True, act_quant=True)
             if duquant_parameters.get(i):
-                qlayer.load_post_parameter(duquant_parameters[i], dev)
+                qlayer.load_post_parameter(duquant_parameters[i], hf_device)
             else:
-                qlayer.register_parameter("qkt_post_scale",torch.nn.Parameter(torch.ones(layer.self_attn.q_proj.out_features,device=dev, dtype=dtype)))
+                qlayer.register_parameter("qkt_post_scale",torch.nn.Parameter(torch.ones(layer.self_attn.q_proj.out_features,device=hf_device, dtype=dtype)))
                 for name,module in qlayer.named_modules():
-                    if isinstance(module, QuantLinear):
+                    if isinstance(module, DuQuantLinear):
                         for key in pairs.keys():
                             if key in name:
                                 act = module.act_quantizer.recorded_x_max.clamp(min=CLIPMIN)
@@ -291,7 +294,7 @@ def duquant(
         # training
         if duquant_parameters.get(i):
             if args.lwc:
-                qlayer.load_lwc_params(duquant_parameters[i], dev)
+                qlayer.load_lwc_params(duquant_parameters[i], hf_device)
         if args.epochs > 0:
             with torch.no_grad():
                 qlayer.float()      # required for AMP training
@@ -314,7 +317,7 @@ def duquant(
                 for j in range(args.nsamples//args.batch_size):  
                     index = j * args.batch_size
                     # obtain output of quantization model
-                    with traincast():
+                    with traincast("cuda"):
                         post_rotate_quant_temporary(qlayer, args)
                         quant_out = qlayer(quant_inps[index:index+args.batch_size,], attention_mask=attention_mask_batch,position_ids=position_ids)[0]
                         loss = loss_func(fp_inps[index:index+args.batch_size,], quant_out)
@@ -353,7 +356,7 @@ def duquant(
         if args.epochs>0 :
             # update input of quantization model
             with torch.no_grad():
-                with torch.cuda.amp.autocast():
+                with traincast("cuda"):
                     for j in range(args.nsamples):
                         quant_inps[j] = qlayer(quant_inps[j].unsqueeze(0), attention_mask=attention_mask,position_ids=position_ids)[0]
             register_scales_and_zeros(qlayer)

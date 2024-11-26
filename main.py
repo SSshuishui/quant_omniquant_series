@@ -19,6 +19,9 @@ from quantize.int_linear import QuantLinear
 
 torch.backends.cudnn.benchmark = True
 
+import warnings
+warnings.filterwarnings("ignore")
+
 def main():
     import argparse
 
@@ -98,11 +101,14 @@ def main():
     parser.add_argument("--illm_norm16",default=False, action="store_true", help="use integer's to calculate")
 
     # For DuQuant
+    parser.add_argument("--smooth",default=False, action="store_true")
+    parser.add_argument("--smooth_epochs", type=int, default=0)
     parser.add_argument("--max_rotation_step", type=int, default=256, help="max steps for rotation transformation")
     parser.add_argument("--permutation_times", type=int, default=1, help="times of permutation transformation")
     parser.add_argument("--lac", type=float, default=None, help="activation clipping ratio")
     parser.add_argument("--swc", type=float, default=None, help="weight clipping ratio, enable withou lwc")
     parser.add_argument("--block_size", type=int, default=128, help="block size for rotation matrices")
+    parser.add_argument("--act_group_size", type=int, default=None)
 
 
     args = parser.parse_args()
@@ -150,47 +156,28 @@ def main():
         "group_size": args.group_size,
         "lwc":args.lwc,
         "disable_zero_point": args.disable_zero_point,
-        "metric": "minimax",
-        "rescale":args.rescale,
-        "rescale_limit":args.rescale_limit,
-        "lsq":args.lsq,
-        "swc":args.swc,
-        "quant_method": args.quant_method,
-        "block_size": args.block_size,
-        "max_rotation_step": args.max_rotation_step,
-        "permutation_times": args.permutation_times,
+        "metric": "minimax"
     }
     args.act_quant_params = {
         "n_bits":  16 if args.only_quant_kv else args.abits,
         "per_channel_axes": [],
         "symmetric": False,
         "dynamic_method": args.a_dynamic_method,
-        "metric": args.metric,
-        "lac":args.lac,
-        "act_group_size": args.act_group_size,
-        "quant_method": args.quant_method,
-        "block_size": args.block_size,
-        "max_rotation_step": args.max_rotation_step,
-        "permutation_times": args.permutation_times,
+        "metric": args.metric
     }
     args.q_quant_params = {
         "n_bits": 16 if args.only_quant_kv else args.abits,
         "per_channel_axes": [],
         "symmetric": False,
         "dynamic_method": args.a_dynamic_method,
-        "metric": args.metric,
-        "quant_method": args.quant_method,
-        "block_size": args.block_size,
-        "max_rotation_step": args.max_rotation_step,
+        "metric": args.metric
     }
     args.k_quant_params = {
         "n_bits": args.abits,
         "per_channel_axes": [],
         "symmetric": False,
         "dynamic_method": args.a_dynamic_method,
-        "metric": args.metric,
-        "quant_method": args.quant_method,
-        "block_size": args.block_size,
+        "metric": args.metric
     }
     args.v_quant_params = {
         "n_bits": args.abits,
@@ -260,12 +247,12 @@ def main():
         torch.save(dataloader, cache_dataloader)
     act_scales = None
     act_shifts = None
-    if args.let:
+    if args.let or args.smooth:
         act_scales = torch.load(args.act_scales)
         act_shifts = torch.load(args.act_shifts)
 
     # quantization
-    if args.method == "omniquant" and args.wbits < 16 or args.abits <16:
+    if args.method == "omniquant" and (args.wbits < 16 or args.abits <16):
         from quantize.omniquant import omniquant
         from models.int_llama_layer import OmniQuantLlamaDecoderLayer
         from models.int_opt_layer import OmniQuantOPTDecoderLayer
@@ -280,7 +267,10 @@ def main():
             act_shifts,
             logger=logger,
         )
-        logger.info(time.time() - tick)
+        logger.info("Time Use: ", time.time() - tick)
+
+        logger.info("=== start evaluation ===")
+        evaluate(lm, args, logger)
 
         if args.save_dir:
             logger.info("=== save model ===")
@@ -299,9 +289,6 @@ def main():
                         del module.fc1_smooth_shift           
             lm.model.save_pretrained(args.save_dir+"/omniquant")  
             lm.tokenizer.save_pretrained(args.save_dir+"/omniquant") 
-        
-        logger.info("=== start evaluation ===")
-        evaluate(lm, args, logger)
 
     elif args.method == "affinequant":
         from quantize.affinequant import affinequant
@@ -318,7 +305,10 @@ def main():
             act_shifts, 
             logger
         )   
-        logger.info(time.time() - tick)
+        logger.info("Time Use: ", time.time() - tick)
+
+        logger.info("=== start evaluation ===")
+        evaluate(lm, args,logger)
 
         if args.save_dir:
             logger.info("=== save model ===")
@@ -338,10 +328,7 @@ def main():
             lm.model.save_pretrained(args.save_dir+"/affinequant")  
             lm.tokenizer.save_pretrained(args.save_dir+"/affinequant") 
 
-        logger.info("=== start evaluation ===")
-        evaluate(lm, args,logger)
-
-    elif args.method == "lrquant" and args.wbits < 16 or args.abits < 16:
+    elif args.method == "lrquant" and (args.wbits < 16 or args.abits < 16):
         from quantize.lrquant import lrquant
         from models.int_llama_layer import LRQuantLlamaDecoderLayer
         from models.int_opt_layer import LRQuantOPTDecoderLayer
@@ -361,7 +348,10 @@ def main():
             act_shifts, 
             logger
         )   
-        logger.info(time.time() - tick)
+        logger.info("Time Use: ", time.time() - tick)
+
+        logger.info("=== start evaluation ===")
+        evaluate_lrquant(lm, args,logger, fp_lm)
 
         if args.save_dir:
             logger.info("=== save model ===")
@@ -380,10 +370,7 @@ def main():
                         del module.fc1_smooth_scale
                         del module.fc1_smooth_shift           
             lm.model.save_pretrained(args.save_dir+"/lrquant")  
-            lm.tokenizer.save_pretrained(args.save_dir+"/lrquant") 
-
-        logger.info("=== start evaluation ===")
-        evaluate_lrquant(lm, args,logger, fp_lm)
+            lm.tokenizer.save_pretrained(args.save_dir+"/lrquant")      
 
     elif args.method == "rptq":
         from quantize.reorderquant import rptq
@@ -419,7 +406,11 @@ def main():
                 layer.set_quant_state(
                     not args.disable_w_quant, not args.disable_a_quant
                 )
-        logger.info(time.time() - tick)
+        logger.info("Time Use: ", time.time() - tick)
+
+        logger.info("=== start evaluation ===")
+        evaluate_illm(lm, args, logger)
+
         if args.save_dir:
         # delete fsbr parameters
             for name, module in lm.model.named_modules():
@@ -437,11 +428,8 @@ def main():
             lm.model.save_pretrained(args.save_dir+"/rptq")  
             lm.tokenizer.save_pretrained(args.save_dir+"/rptq") 
         
-        logger.info("=== start evaluation ===")
-        evaluate_illm(lm, args, logger)
-
     
-    elif args.method == "slim++" and args.wbits < 16 or args.abits < 16:
+    elif args.method == "slim++" and (args.wbits < 16 or args.abits < 16):
         from quantize.omniquant import omniquant
         from models.int_llama_layer import OmniQuantLlamaDecoderLayer
         from models.int_opt_layer import OmniQuantOPTDecoderLayer
@@ -460,7 +448,10 @@ def main():
             args.block_precision,
             logger
         ) 
-        logger.info(time.time() - tick)
+        logger.info("Time Use: ", time.time() - tick)
+
+        logger.info("=== start evaluation ===")
+        evaluate(lm, args, logger)
 
         if args.save_dir:
             logger.info("=== save model ===")
@@ -479,16 +470,20 @@ def main():
                         del module.fc1_smooth_shift           
             lm.model.save_pretrained(args.save_dir+"/slimpp")  
             lm.tokenizer.save_pretrained(args.save_dir+"/slimpp") 
-        logger.info("=== start evaluation ===")
-        evaluate(lm, args, logger)
+        
 
-    elif args.method == "illm" and args.wbits >= 16 or args.abits >= 16:
+    elif args.method == "illm" and (args.wbits >= 16 or args.abits >= 16):
         tick = time.time()
         from .quantize.illm_FSBR import FSBR 
         from models.int_llama_layer import ILLMlamaDecoderLayer
         from models.int_opt_layer import ILLMOptDecoderLayer
         from eval_ppl_utils import evaluate_illm
 
+        self.weight_quant_params.update({
+            "rescale":args.rescale,
+            "rescale_limit":args.rescale_limit,
+            "lsq":args.lsq
+        })
         FSBR( 
             lm,
             args,
@@ -497,9 +492,13 @@ def main():
             act_shifts,
             logger
         )
-        logger.info(time.time() - tick)
+        logger.info("Time Use: ", time.time() - tick)
+
+        logger.info("=== start evaluation ===")
+        evaluate_illm(lm, args, logger)
+        
         if args.save_dir:
-        # delete fsbr parameters
+            logger.info("=== save model ===")
             for name, module in lm.model.named_modules():
                 if isinstance(module, QuantLinear):
                     del module.weight_quantizer.lowbound_factor
@@ -514,13 +513,36 @@ def main():
                         del module.fc1_smooth_shift           
             lm.model.save_pretrained(args.save_dir+"/illm")  
             lm.tokenizer.save_pretrained(args.save_dir+"/illm") 
-        
-        logger.info("=== start evaluation ===")
-        evaluate_illm(lm, args, logger)
+                
 
-    elif args.method == "duquant" and args.wbits < 16 or args.abits < 16:
+    elif args.method == "duquant" and (args.wbits < 16 or args.abits < 16):
         from quantize.duquant import duquant
         from eval_ppl_utils import evaluate 
+
+        args.weight_quant_params.update({
+            "swc":args.swc,
+            "quant_method": args.method,
+            "block_size": args.block_size,
+            "max_rotation_step": args.max_rotation_step,
+            "permutation_times": args.permutation_times,
+        })
+        args.act_quant_params.update({
+            "lac":args.lac,
+            "act_group_size": args.act_group_size,
+            "quant_method": args.method,
+            "block_size": args.block_size,
+            "max_rotation_step": args.max_rotation_step,
+            "permutation_times": args.permutation_times
+        })
+        args.q_quant_params.update({
+            "quant_method": args.method,
+            "block_size": args.block_size,
+            "max_rotation_step": args.max_rotation_step
+        })
+        args.k_quant_params.update({
+            "quant_method": args.method,
+            "block_size": args.block_size
+        })
 
         tick = time.time()
         duquant(
@@ -531,14 +553,14 @@ def main():
             act_shifts,
             logger
         )
-        logger.info(time.time() - tick)
+        logger.info("Time Use: ", time.time() - tick)
+        
+        logger.info("=== start evaluation ===")
+        evaluate(lm, args, logger)
 
         if args.save_dir:
             lm.model.save_pretrained(args.save_dir+"/duquant")  
             lm.tokenizer.save_pretrained(args.save_dir+"/duquant") 
-        
-        logger.info("=== start evaluation ===")
-        evaluate(lm, args, logger)
         
 if __name__ == "__main__":
     print(sys.argv)

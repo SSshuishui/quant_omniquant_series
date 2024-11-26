@@ -1,11 +1,12 @@
 import torch
-# from torch._six import inf
 from math import inf
 import logging
 from termcolor import colored
 import sys
 import os
 import time
+import math
+import pickle
 
 
 @torch.no_grad()
@@ -79,3 +80,43 @@ def create_logger(method_name, output_dir, dist_rank=0, name=''):
     logger.addHandler(file_handler)
 
     return logger
+
+
+def exchange_row_col(_tensor, i, j):
+    tensor = _tensor.detach().clone()
+    assert isinstance(tensor, torch.Tensor)
+    indices_row = torch.arange(tensor.size(0))
+    indices_row[i], indices_row[j] = indices_row[j].item(), indices_row[i].item()
+    tensor = tensor[indices_row]
+
+    indices_col = torch.arange(tensor.size(1))
+    indices_col[i], indices_col[j] = indices_col[j].item(), indices_col[i].item()
+    tensor = tensor[:, indices_col]
+    return tensor
+
+Rot = {}
+def get_rot(n, device='cpu'):
+    try:
+        if Rot.get(n) is None:
+            Rot[n] = pickle.load(open("Rot.pkl", "rb"))[n]
+        R = Rot[n].to(device)
+        random_matrix = torch.randn(n-1, n-1).to(device)
+        q, r = torch.linalg.qr(random_matrix)
+        q = torch.cat([torch.zeros(n-1, 1).to(device), q], dim=1)
+        q = torch.cat([torch.zeros(1, n).to(device), q], dim=0)
+        q[0, 0] = 1
+        R = torch.matmul(R,q)
+        return R
+    except Exception as e:
+        print(e)
+        assert False, 'No such rotate matrix'
+
+
+def get_hadamard(n): 
+    if n == 1:
+        return torch.tensor([[1.]], dtype=torch.float32)
+    else:
+        assert n % 1 == 0, "The size should be divided by 2."
+        H_n_minus_1 = get_hadamard(n//2)
+        return torch.cat([torch.cat([H_n_minus_1, H_n_minus_1], dim=1),
+                          torch.cat([H_n_minus_1, -H_n_minus_1], dim=1)], dim=0) / math.sqrt(2)

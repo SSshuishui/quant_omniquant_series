@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from quantize.du_quantizer import UniformAffineQuantizer
 
 
 class QuantMatMul(nn.Module):
@@ -13,6 +12,8 @@ class QuantMatMul(nn.Module):
         matmul_func=torch.bmm,
     ):
         super().__init__()
+        from quantize.quantizer import UniformAffineQuantizer
+
         # de-activate the quantized forward default
         self.use_act_quant = False
         # initialize quantizer
@@ -53,12 +54,14 @@ class DuQuantMatMul(nn.Module):
         rotate=True,
     ):
         super().__init__()
+        from quantize.du_quantizer import UniformAffineQuantizer
+        
         # de-activate the quantized forward default
         self.use_act_quant = False
         # initialize quantizer
         self.i_cluster_counts = None
-        self.x1_quantizer = UniformAffineQuantizer(**x1_quant_params,rotate=rotate)
-        self.x2_quantizer = UniformAffineQuantizer(**x2_quant_params,rotate=rotate)
+        self.x1_quantizer = UniformAffineQuantizer(**x1_quant_params, rotate=rotate)
+        self.x2_quantizer = UniformAffineQuantizer(**x2_quant_params, rotate=rotate)
         self.matmul_func = matmul_func
 
         self.disable_act_quant = disable_act_quant

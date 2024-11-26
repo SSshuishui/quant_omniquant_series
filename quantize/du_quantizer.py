@@ -5,9 +5,10 @@ from typing import Union
 import numpy as np
 import math
 from utils import get_rot, exchange_row_col, get_hadamard
-from quantize.const import CLIPMAX, CLIPMIN
 import random
 
+CLIPMIN = 1e-5 # 1e-5
+CLIPMAX = 1e4 # 1e4
 
 
 def round_ste(x: torch.Tensor):
@@ -29,6 +30,7 @@ class UniformAffineQuantizer(nn.Module):
         dynamic_method="per_cluster",
         group_size=None,
         shape=None,
+        disable_zero_point=False,
         lwc=False,
         swc=None,
         lac=None,
@@ -68,7 +70,6 @@ class UniformAffineQuantizer(nn.Module):
         self.max_rotation_step = max_rotation_step
         self.quant_method = quant_method
         
-
         init_value = 4.             # init value of learnable weight clipping
         if lwc:
             if group_size:
@@ -107,6 +108,7 @@ class UniformAffineQuantizer(nn.Module):
             self.R, self.permutation_list = [], []
             if self.rotate is not False:
                 self.init_duquant_params = torch.tensor(0)
+
 
     def change_n_bits(self, n_bits):
         self.n_bits = n_bits
@@ -437,7 +439,8 @@ class UniformAffineQuantizer(nn.Module):
     def copy_duquant_params(self, quantizer_ref):
         if quantizer_ref.rotate is True:
             assert quantizer_ref.init_duquant_params == True
-            self.R = quantizer_ref.R.clone().detach()
+            # self.R = quantizer_ref.R.clone().detach()
+            self.R = quantizer_ref.R
             try:
                 self.permutation_list = quantizer_ref.permutation_list.clone().detach()
             except:
