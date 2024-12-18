@@ -2,13 +2,13 @@
 Include:
 | Methods | Quantize | PPL Eval | Task Eval | Save |
 | :--- | ---: | :---: | :---: | :---: 
-| OmniQuant | ✅ | ✅ | TODO | ✅ 
-| AffineQuant | ✅ | ✅ | TODO | ✅ 
-| LRQuant | ✅ | ✅ | TODO | ✅ 
-| RPTQ | TODO | TODO | TODO | TODO 
-| Slim-Plus | ✅ | ✅ | TODO | TODO 
-| I-LLM | ✅ | ✅ | TODO | TODO 
-| DuQuant | ✅ | ✅ | TODO | TODO 
+| [OmniQuant](https://arxiv.org/pdf/2308.13137) | yes | yes | TODO | yes 
+| [AffineQuant](https://arxiv.org/pdf/2403.12544) | yes | yes | TODO | yes 
+| [LRQuant](https://aclanthology.org/2024.acl-long.122.pdf) | yes | yes | TODO | yes 
+| [RPTQ](https://arxiv.org/pdf/2304.01089) | TODO | TODO | TODO | TODO 
+| [Slim-Plus](https://arxiv.org/pdf/2405.14917) | yes | yes | TODO | TODO 
+| [I-LLM](https://arxiv.org/pdf/2405.17849) | yes | yes | TODO | TODO 
+| [DuQuant](https://arxiv.org/pdf/2406.01721) | yes | yes | TODO | TODO 
 
 ## Install
 ```
